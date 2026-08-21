@@ -1,0 +1,18 @@
+# Bundled runtimes and build products — installed by scripts, never committed
+runtime/
+gui/.venv/
+gui/dist/
+gui/build/
+gui/electron/node_modules/
+
+# Internal notes and machine-specific logs
+NOTES-internal.md
+SILICON-NODE-HANDOFF.md
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Release artifacts
+release/

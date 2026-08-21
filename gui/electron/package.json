@@ -1,0 +1,10 @@
+{
+  "name": "silicon-node",
+  "productName": "Silicon Node",
+  "version": "0.5.0",
+  "main": "main.js",
+  "private": true,
+  "dependencies": {
+    "electron": "^43.4.1"
+  }
+}

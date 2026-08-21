@@ -1,0 +1,9 @@
+{
+  "name": "Silicon Node",
+  "short_name": "Silicon Node",
+  "display": "standalone",
+  "background_color": "#0d1210",
+  "theme_color": "#0d1210",
+  "start_url": "/ui",
+  "icons": [{ "src": "/ui/icon.png", "sizes": "256x256", "type": "image/png" }]
+}
