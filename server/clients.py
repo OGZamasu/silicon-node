@@ -58,11 +58,37 @@ class ClientStore:
             token = secrets.token_urlsafe(32)  # never logged
             c = {"name": name, "token": token,
                  "created": time.strftime("%Y-%m-%d %H:%M:%S"),
-                 "last_seen": None}
+                 "last_seen": None,
+                 "jobs_total": 0, "jobs_by_kind": {}, "llm_requests": 0}
             self._clients.append(c)
             self._tokens[token] = c
             self._save()
             return name, token
+
+    def count_job(self, name: str, kind: str) -> None:
+        """Lifetime job counters per keyholder (handoff 132). Jobs are
+        rare enough to persist immediately."""
+        with self._lock:
+            for c in self._clients:
+                if c["name"] == name:
+                    c["jobs_total"] = c.get("jobs_total", 0) + 1
+                    by = c.setdefault("jobs_by_kind", {})
+                    by[kind] = by.get(kind, 0) + 1
+                    self._save()
+                    return
+
+    def count_llm(self, name: str) -> None:
+        """Chat request counter; chatty, so persistence rides the same
+        ≤1-write-per-minute throttle as last_seen."""
+        with self._lock:
+            for c in self._clients:
+                if c["name"] == name:
+                    c["llm_requests"] = c.get("llm_requests", 0) + 1
+                    now = time.time()
+                    if now - self._last_persist > 60:
+                        self._last_persist = now
+                        self._save()
+                    return
 
     def revoke(self, name: str) -> bool:
         with self._lock:
@@ -77,7 +103,11 @@ class ClientStore:
     def listing(self) -> list[dict]:
         with self._lock:
             return [{"name": c["name"], "created": c["created"],
-                     "last_seen": c["last_seen"]} for c in self._clients]
+                     "last_seen": c["last_seen"],
+                     "jobs_total": c.get("jobs_total", 0),
+                     "jobs_by_kind": c.get("jobs_by_kind", {}),
+                     "llm_requests": c.get("llm_requests", 0)}
+                    for c in self._clients]
 
     def name_of(self, token: str) -> str | None:
         """The paired client's name for a live token, else None."""

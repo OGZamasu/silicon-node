@@ -139,13 +139,34 @@ def health():
     }
 
 
-def _submitter(request: Request) -> dict:
+def _bearer_of(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    return header.removeprefix("Bearer ").strip() if header else ""
+
+
+def _actor(request: Request):
+    """Who is acting: "admin" (swarm token), "node" (node token or
+    unauthenticated local use while enforcement is off), or a paired
+    client's name."""
+    tok = _bearer_of(request)
+    if not tok:
+        return "node"   # the local dashboard, pre-enforcement
+    if config.SWARM_TOKEN and tok == config.SWARM_TOKEN:
+        return "admin"
+    if config.TOKEN and tok == config.TOKEN:
+        return "node"
+    from .clients import CLIENTS  # noqa: PLC0415
+    return CLIENTS.name_of(tok) or "node"
+
+
+def _submitter(request: Request, cap: Optional[str] = None) -> dict:
     """Who sent this job: the paired client's name when they used their
     own token, the shared/node token labels otherwise, plus source IP.
     Tailnet and LAN traffic is proxied through the Windows host, so that
-    source IP is flagged rather than shown as if it were the sender."""
-    header = request.headers.get("authorization", "")
-    tok = header.removeprefix("Bearer ").strip() if header else ""
+    source IP is flagged rather than shown as if it were the sender.
+    When cap is given and the sender is a paired client, their lifetime
+    job counters tick (handoff 132)."""
+    tok = _bearer_of(request)
     who = None
     if tok:
         if config.SWARM_TOKEN and tok == config.SWARM_TOKEN:
@@ -155,6 +176,8 @@ def _submitter(request: Request) -> dict:
         else:
             from .clients import CLIENTS  # noqa: PLC0415
             who = CLIENTS.name_of(tok)
+            if who and cap:
+                CLIENTS.count_job(who, cap)
     ip = request.client.host if request.client else None
     from .llm import _windows_host_ip  # noqa: PLC0415
     return {"client": who, "ip": ip,
@@ -181,7 +204,7 @@ async def image_to_mesh(
     _require_enabled("image-to-mesh")
 
     job = STORE.submit("image-to-mesh", params, defer=True)
-    job.submitted_by = _submitter(request)
+    job.submitted_by = _submitter(request, "image-to-mesh")
     job.dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(image.filename or "input.png").suffix or ".png"
     image_path = job.dir / f"input{suffix}"
@@ -249,6 +272,11 @@ async def queue_cancel(request: Request):
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
+    if _actor(request) not in ("admin", "node"):
+        raise HTTPException(
+            status_code=403,
+            detail="Clearing the whole queue is for the swarm admin or "
+                   "the node owner; members can cancel their own jobs.")
     scope = body.get("scope", "pending")
     if scope not in ("pending", "all"):
         raise HTTPException(status_code=400,
@@ -257,7 +285,9 @@ async def queue_cancel(request: Request):
 
 
 @app.post("/v1/jobs/{job_id}/{action}")
-def job_action(job_id: str, action: str, direction: str = "up"):
+def job_action(job_id: str, action: str, request: Request,
+               direction: str = "up"):
+    _require_job_owner(request, job_id)
     ok = False
     if action == "cancel":
         ok = STORE.cancel(job_id)
@@ -833,7 +863,7 @@ async def submit_generic(request: Request):
                    "(multipart) which accepts the file directly.")
     _require_enabled(cap)
     job = STORE.submit(cap, params)
-    job.submitted_by = _submitter(request)
+    job.submitted_by = _submitter(request, cap)
     job.save()
     return {"job_id": job.job_id}
 
@@ -861,7 +891,7 @@ async def retopologize_upload(
                    "or GLTF.")
     _require_enabled("retopologize")
     job = STORE.submit("retopologize", params, defer=True)
-    job.submitted_by = _submitter(request)
+    job.submitted_by = _submitter(request, "retopologize")
     job.dir.mkdir(parents=True, exist_ok=True)
     mesh_path = job.dir / f"input{suffix}"
     with mesh_path.open("wb") as f:
@@ -875,9 +905,77 @@ async def retopologize_upload(
 # LLM management (ninfer-3090)
 # ---------------------------------------------------------------------------
 
+def _require_operator(request: Request, what: str) -> None:
+    """Engine control is for the swarm admin or the node owner —
+    members chat with the model, they don't restart it (handoff 132)."""
+    if _actor(request) not in ("admin", "node"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"{what} is for the swarm admin or the node owner.")
+
+
 @app.get("/v1/llm")
 def llm_status():
     return LLM.status()
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions_proxy(request: Request):
+    """The OpenAI chat surface THROUGH the node, so member usage is
+    attributable (handoff 132). The engines bind the Windows loopback,
+    which WSL sockets cannot reach — interop curl bridges it, streaming
+    included. Clients that should be counted point at :8790/v1 instead
+    of the engine port; the engine ports keep working unchanged."""
+    import asyncio  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import uuid  # noqa: PLC0415
+    from .llamacpp import LLAMACPP, PORT as GGUF_PORT  # noqa: PLC0415
+    if LLM.running:
+        port = LLM_PORT
+    elif LLAMACPP.running:
+        port = GGUF_PORT
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="No chat engine is running — start one via "
+                   "/v1/llm/start or /v1/gguf/start.")
+    actor = _actor(request)
+    if actor not in ("admin", "node"):
+        from .clients import CLIENTS  # noqa: PLC0415
+        CLIENTS.count_llm(actor)
+    body = await request.body()
+    stream = b'"stream": true' in body or b'"stream":true' in body
+    # Windows curl reads a Windows path (interop passes argv verbatim).
+    win_tmp = os.environ.get("SILICON_NODE_WIN_TMP", r"C:\Windows\Temp")
+    wsl_tmp = Path("/mnt/" + win_tmp[0].lower()
+                   + win_tmp[2:].replace("\\", "/")) / "silicon-chat"
+    wsl_tmp.mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}.json"
+    (wsl_tmp / name).write_bytes(body)
+    proc = await asyncio.create_subprocess_exec(
+        "/mnt/c/Windows/System32/curl.exe", "-s", "-N", "-X", "POST",
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        "-H", "Content-Type: application/json",
+        "--data-binary", "@" + win_tmp + "\\silicon-chat\\" + name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL)
+
+    async def pump():
+        try:
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            (wsl_tmp / name).unlink(missing_ok=True)
+            if proc.returncode is None:
+                proc.kill()
+
+    from fastapi.responses import StreamingResponse  # noqa: PLC0415
+    return StreamingResponse(
+        pump(),
+        media_type="text/event-stream" if stream else "application/json")
 
 
 @app.get("/v1/llm/models")
@@ -895,6 +993,7 @@ def llm_models():
 
 @app.post("/v1/llm/start")
 async def llm_start(request: Request):
+    _require_operator(request, "Starting or switching the chat model")
     profile, model_file, context_length = "c1", None, None
     try:
         body = await request.json()
@@ -930,7 +1029,8 @@ async def llm_start(request: Request):
 
 
 @app.post("/v1/llm/stop")
-def llm_stop():
+def llm_stop(request: Request):
+    _require_operator(request, "Stopping the chat model")
     LLM.stop()
     return LLM.status()
 
@@ -1004,7 +1104,7 @@ async def text_to_video_submit(request: Request):
               "engine": "ltx" if model == "ltx2-distilled" else "wan"}
     _require_enabled("text-to-video")
     job = STORE.submit("text-to-video", params, defer=True)
-    job.submitted_by = _submitter(request)
+    job.submitted_by = _submitter(request, "text-to-video")
     job.dir.mkdir(parents=True, exist_ok=True)
     if body.get("image_b64"):
         try:
@@ -1042,7 +1142,7 @@ async def portrait_animate_submit(request: Request):
             detail="LivePortrait is still installing on this node.")
     _require_enabled("portrait-animate")
     job = STORE.submit("portrait-animate", {}, defer=True)
-    job.submitted_by = _submitter(request)
+    job.submitted_by = _submitter(request, "portrait-animate")
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     drv_suffix = Path(body.get("driving_name", "d.mp4")).suffix or ".mp4"
@@ -1076,7 +1176,7 @@ async def talking_head_submit(request: Request):
             detail="SadTalker is still installing on this node.")
     _require_enabled("talking-head")
     job = STORE.submit("talking-head", {}, defer=True)
-    job.submitted_by = _submitter(request)
+    job.submitted_by = _submitter(request, "talking-head")
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     aud_suffix = Path(body.get("audio_name", "a.wav")).suffix or ".wav"
@@ -1142,6 +1242,7 @@ async def gguf_download(request: Request):
 
 @app.post("/v1/gguf/start")
 async def gguf_start(request: Request):
+    _require_operator(request, "Starting or switching the GGUF engine")
     from .llamacpp import LLAMACPP
     body = await request.json()
     if STORE.queue_depth() > 0:
@@ -1161,7 +1262,8 @@ async def gguf_start(request: Request):
 
 
 @app.post("/v1/gguf/stop")
-def gguf_stop():
+def gguf_stop(request: Request):
+    _require_operator(request, "Stopping the GGUF engine")
     from .llamacpp import LLAMACPP
     LLAMACPP.stop()
     return LLAMACPP.status()
@@ -1293,11 +1395,27 @@ def _queue_view() -> dict:
     return {"running": running, "pending": pending}
 
 
+def _require_job_owner(request: Request, job_id: str) -> None:
+    """Members touch only their own jobs; the swarm admin and the node
+    owner touch anything (handoff 132)."""
+    actor = _actor(request)
+    if actor in ("admin", "node"):
+        return
+    job = STORE.get(job_id)
+    owner = (job.submitted_by or {}).get("client") if job else None
+    if owner != actor:
+        raise HTTPException(
+            status_code=403,
+            detail="Members can manage only their own jobs — this one "
+                   f"was submitted by {owner or 'someone else'}.")
+
+
 @app.delete("/v1/queue/{job_id}")
-def queue_delete(job_id: str):
+def queue_delete(job_id: str, request: Request):
     """Cancel one job by id — the Mac's per-row ✕ button (handoff 128).
     Pending jobs are dropped; the running job aborts at its next
     progress checkpoint."""
+    _require_job_owner(request, job_id)
     if STORE.cancel(job_id):
         return {"ok": True}
     raise HTTPException(
