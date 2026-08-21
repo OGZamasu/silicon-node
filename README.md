@@ -1,107 +1,73 @@
 # Silicon Node
 
-The **Windows/CUDA node** for [Silicon Optimizer](https://github.com/OGZamasu/silicon-optimizer)
-swarms: a GPU job service that runs what a Mac can't, and lends its
-RTX-class GPU to every machine in your swarm.
+**Turn your gaming PC into an AI powerhouse for every computer you own.**
 
-A Mac running Silicon Optimizer delegates work here over your own network —
-nothing leaves it — and renders live progress for every job. One node can
-serve several Macs; one Mac can use several nodes.
+Got a Mac running [Silicon Optimizer](https://github.com/OGZamasu/silicon-optimizer)
+and a Windows PC with a serious NVIDIA card? Connect them. Your Mac sends
+the heavy AI work over, your PC renders it, the result comes right back.
 
-## What it serves
+Everything stays on your own network. No cloud. No subscription. No data
+leaving your house.
 
-| Ability | Backed by | Peak VRAM (measured) |
-|---|---|---|
-| Image → clean low-poly 3D model | TRELLIS.2 + LATO.2 retopology | ~10–13 GB |
-| Mesh retopology | LATO.2 (resident, ~16 s warm) | ~7 GB |
-| Text → video clip | Wan 2.2 TI2V-5B **or** LTX-2 distilled (~2.6× faster, NF4) | 12–16 GB |
-| Portrait + video performance → animated clip | LivePortrait | ~4 GB |
-| Portrait + speech audio → lip-synced clip | SadTalker | ~5 GB |
-| Chat / agent completions (OpenAI + Anthropic APIs) | ninfer (Qwen3.8-27B INT8, up to 64K context) or llama.cpp GGUFs (128K on small models) | 17–21 GB |
+## What your PC can do
 
-One GPU job runs at a time; jobs preempt the chat model and it restores
-itself when the queue drains. Every job reports progress, stage, step,
-ETA, and who submitted it. A web dashboard (with tray app) shows and
-controls all of it, including per-model configuration, enable/disable per
-ability, and remote settings the Mac's Swarm page can edit.
+- **Make videos from text.** Two engines — one fast for trying ideas, one
+  slower for the good version.
+- **Turn a picture into a 3D model.** Clean, game-ready geometry, not a
+  blobby scan.
+- **Make a photo talk.** Portrait in, audio in, lip-synced clip out.
+- **Animate a portrait.** Act out a performance on camera and a photo
+  copies it.
+- **Run chat AI.** A 27B model with a huge memory, or any GGUF model you
+  download — with a one-click model library.
 
-## Hardware you need
+Your Mac sees all of it automatically: live progress bars, a queue you
+can reorder or cancel, and a card showing exactly what your GPU is doing
+and who asked for it.
 
-- **NVIDIA GPU** — 24 GB VRAM (RTX 3090/4090 class) runs everything.
-  Smaller cards can serve subsets: the 3D pipeline needs ~13 GB, video
-  12–16 GB, the 27B chat model ~21 GB; GGUF chat scales down to any card.
-- **64 GB system RAM recommended** (LTX-2's CPU-offloaded weights want a
-  48 GB WSL allocation; 32 GB works without LTX-2).
-- **Windows 10/11 with WSL2** and a recent NVIDIA driver.
-- ~250 GB of disk for the full model set.
+## What you need
 
-## Install
+- **An NVIDIA GPU.** 24 GB of VRAM (3090 / 4090 class) runs everything.
+  Smaller card? Just install fewer abilities — each one is optional.
+- **RAM:** 64 GB is ideal. 32 GB works if you skip the biggest video model.
+- **Windows 10 or 11** with WSL2.
+- **Disk:** about 250 GB if you want every model.
 
-Two layers: the **node runtime** (this repo: FastAPI service, dashboard,
-tray app, setup scripts) and the **model stack** (WSL distro, conda envs,
-weights — tens of GB, provisioned by documented steps).
-
-### Runtime, via scoop
+## Get it
 
 ```powershell
 scoop bucket add silicon https://github.com/OGZamasu/silicon-node
 scoop install silicon-node
 ```
 
-Or grab the release zip from
-[Releases](https://github.com/OGZamasu/silicon-node/releases) (checksums in
-`SHA256SUMS.txt`) and run `install.ps1` — it creates the Start-menu and
-autostart entries for the tray app.
+No scoop? Grab the [latest release](https://github.com/OGZamasu/silicon-node/releases),
+unzip it, run `install.ps1`.
 
-### Model stack
+That's the app. The AI models are a separate, bigger download — the
+[setup guide](docs/PROVISIONING.md) walks you through them **one ability
+at a time**. You can stop after any section and have a working node.
 
-See [docs/PROVISIONING.md](docs/PROVISIONING.md): create the WSL2 distro,
-install CUDA + conda envs, fetch the model weights for the abilities you
-want, and enable the `silicon-node` systemd service. Each ability is
-independent — install only what your card fits. The service advertises
-abilities as `ready` the moment their weights land.
+## Join your swarm
 
-## First run
+1. On the Mac: **Silicon Optimizer → Swarm tab**, pair with the six-digit
+   code.
+2. On this PC: run `save-swarm-token.ps1` and paste the token it gives you.
+3. Restart the service. Your PC now has its own card in the Mac app —
+   GPU meter, job queue, and controls.
 
-1. Start the service (systemd inside the distro; the tray app shows a
-   green die when it's healthy).
-2. Open the dashboard: `http://127.0.0.1:8790/ui` — Models shows every
-   installed model with configure/uninstall controls; Activity shows the
-   job queue.
-3. Tokens: run `set-tokens.ps1` (HuggingFace, needed once for the gated
-   DINOv3 repo) — prompts are hidden, nothing lands in shell history.
+## The one rule
 
-## Join a swarm
+**Never open the server to your network without the swarm token set.**
+Your GPU should not take orders from strangers. That's the whole rule —
+the details live in [SECURITY.md](SECURITY.md).
 
-Pairing starts on the Mac: **Silicon Optimizer → Swarm tab** pairs
-members with a six-digit code and distributes the swarm config. For this
-node's side:
+## For tinkerers
 
-1. Run `save-swarm-token.ps1` and paste the swarm token from the Mac
-   (written to `/opt/silicon/swarm.json` in the distro, together with the
-   peer registry; hidden prompt).
-2. Restart the service. The Mac's Swarm page now shows this machine —
-   queue, GPU meter, per-ability toggles, context control, cancel
-   buttons, all live.
-3. Optional but recommended: the Mac mints **per-member client tokens**
-   (`POST /swarm/clients`, admin = swarm token) so every job is
-   attributed to the machine that sent it and any member can be revoked
-   individually.
+Everything the Mac does goes through a plain HTTP API you can use too:
+submit jobs, watch progress, manage models, control the queue. There's
+also an MCP server (`mcp_server.py`) so Claude or ChatGPT can drive your
+node directly, and a dashboard in any browser at
+`http://127.0.0.1:8790/ui`.
 
-**Security rule, non-negotiable:** never expose the server beyond
-localhost without the swarm token set — see [SECURITY.md](SECURITY.md).
-
-## API in one breath
-
-`GET /v1/capabilities` (abilities + descriptions + settings) ·
-`POST /v1/jobs` / per-ability endpoints (`/v1/image-to-mesh`,
-`/v1/text-to-video`, `/v1/portrait-animate`, `/v1/talking-head`,
-`/v1/retopologize`) · `GET /v1/jobs/{id}` (progress/stage/step/ETA) ·
-`GET /v1/node` (swarm advertisement: metrics, queue, GPU consumer) ·
-`GET /v1/models` (inventory) · `/v1/llm*` and `/v1/gguf*` (chat engines) ·
-`POST /v1/queue/cancel`, `DELETE /v1/queue/{id}` · MCP adapter in
-`mcp_server.py` so any Claude/ChatGPT can drive the node.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+MIT licensed. Built to pair with Silicon Optimizer — same versions, same
+release rhythm.

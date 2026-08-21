@@ -1,9 +1,24 @@
-# Provisioning the model stack
+# Setting up the models
 
-The runtime in this repo is small; the models are not. This walks a fresh
-Windows machine to a fully-armed node. Every section is optional — install
-only the abilities your GPU fits. The service advertises each ability as
-`ready` automatically once its weights exist.
+This is the long part — but it's honest about it, and it's built so you
+can't really get lost:
+
+- **Every section is optional.** Only sections 1, 2, and 7 are required.
+  Skip any ability you don't want; add it later any time.
+- **You can stop whenever.** Finish any section and you have a working
+  node — abilities light up on the Mac automatically the moment their
+  files exist. No "finish everything or nothing works."
+- **One section at a sitting is fine.** Most are copy-paste-wait.
+
+Your path:
+
+- [ ] 1. WSL2 + CUDA (required, ~30 min)
+- [ ] 2. Python environment (required, ~10 min)
+- [ ] 3. 3D models — image → mesh
+- [ ] 4. Video models — text → clip
+- [ ] 5. Portrait models — talking + animated photos
+- [ ] 6. Chat models
+- [ ] 7. The service itself (required, ~5 min)
 
 Throughout: the WSL distro is named `SiliconNode`, the service tree lives
 at `/opt/silicon/silicon-node`, data at `/opt/silicon/data`.
