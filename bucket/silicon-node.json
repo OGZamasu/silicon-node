@@ -1,21 +1,21 @@
 {
-    "version": "0.3.0",
-    "description": "Windows/CUDA render + LLM node for Silicon Optimizer swarms",
-    "homepage": "https://github.com/OGZamasu/silicon-node",
-    "license": "MIT",
-    "url": "https://github.com/OGZamasu/silicon-node/releases/download/v0.3.0/silicon-node-v0.3.0.zip",
-    "hash": "TO-BE-FILLED-BY-PACKAGE-SCRIPT",
-    "extract_dir": "silicon-node",
-    "notes": [
-        "Run install.ps1 in the app directory to set up the tray app,",
-        "then follow docs/PROVISIONING.md for the WSL model stack.",
-        "Security: never expose the server beyond localhost without the",
-        "swarm token set (SECURITY.md)."
-    ],
-    "checkver": {
-        "github": "https://github.com/OGZamasu/silicon-node"
-    },
-    "autoupdate": {
-        "url": "https://github.com/OGZamasu/silicon-node/releases/download/v$version/silicon-node-v$version.zip"
-    }
+    "version":  "0.3.0",
+    "description":  "Windows/CUDA render + LLM node for Silicon Optimizer swarms",
+    "homepage":  "https://github.com/OGZamasu/silicon-node",
+    "license":  "MIT",
+    "url":  "https://github.com/OGZamasu/silicon-node/releases/download/v0.3.0/silicon-node-v0.3.0.zip",
+    "hash":  "b12cb212b9d429345756b8a51c38da51112e48e35d288e9872399181e7146571",
+    "extract_dir":  "silicon-node",
+    "notes":  [
+                  "Run install.ps1 in the app directory to set up the tray app,",
+                  "then follow docs/PROVISIONING.md for the WSL model stack.",
+                  "Security: never expose the server beyond localhost without the",
+                  "swarm token set (SECURITY.md)."
+              ],
+    "checkver":  {
+                     "github":  "https://github.com/OGZamasu/silicon-node"
+                 },
+    "autoupdate":  {
+                       "url":  "https://github.com/OGZamasu/silicon-node/releases/download/v$version/silicon-node-v$version.zip"
+                   }
 }
