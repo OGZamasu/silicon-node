@@ -28,6 +28,8 @@ DEFAULTS: dict[str, dict] = {
     "retopologize": {"vert_num": config.VERT_NUM_DEFAULT},
     "text-to-video": {"resolution": "720p", "wan_steps": 30,
                       "ltx_steps": 8},
+    "text-to-image": {"default_model": "qwen-image", "qwen_steps": 30,
+                      "sana_steps": 20, "sdxl_steps": 30},
     "portrait-animate": {},
     "talking-head": {},
 }

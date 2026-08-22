@@ -301,9 +301,12 @@ class JobStore:
 
         # GPU arbitration: 3D jobs and the resident LLM cannot share the
         # 24 GB card — the job preempts, the LLM is restored afterwards.
+        # Store installs are pure downloads; chat keeps running through
+        # them (hub 137).
         from .llm import LLM  # noqa: PLC0415
         from . import pipeline as _pipeline  # noqa: PLC0415
-        LLM.preempt_for_job()
+        if job.capability != "store-install":
+            LLM.preempt_for_job()
 
         def progress(frac: float, stage: str, step: Optional[int] = None,
                      steps_total: Optional[int] = None) -> None:

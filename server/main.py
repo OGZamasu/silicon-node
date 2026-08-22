@@ -341,6 +341,11 @@ _CAP_DESCRIPTIONS = {
         "starting from an image. Wan 2.2 TI2V-5B is the quality engine; "
         "LTX-2 distilled renders the same clip about 2.6× faster for "
         "iteration — choose with the model field.",
+    "text-to-image":
+        "Renders still images from a text prompt. Qwen-Image 20B is the "
+        "quality engine (it can put readable text in images); Sana is "
+        "the seconds-per-image iteration lane — choose with the model "
+        "field. More image models install from the model store.",
     "portrait-animate":
         "Animates a still portrait with a recorded video performance "
         "via LivePortrait: the driving clip's expression and head "
@@ -413,6 +418,22 @@ def capability_list() -> list[dict]:
                       "flips ready automatically.",
         },
         {
+            "id": "text-to-image",
+            "name": "Text → image (Qwen-Image 20B + Sana)",
+            "kind": "image",
+            "peak_vram_gb": _measured("text-to-image", "peak_vram_gb"),
+            "typical_seconds": _measured("text-to-image",
+                                         "typical_seconds"),
+            "ready": _image_ready(),
+            "detail": ("POST /v1/text-to-image {prompt, width, height, "
+                       "steps?, seed?, negative_prompt?, model?} → job; "
+                       "result_urls carries the .png. Models: "
+                       + ", ".join(_installed_image_models() or ["none"])
+                       + "." if _image_ready() else
+                       "Image model weights still installing — flips "
+                       "ready automatically (see the model store)."),
+        },
+        {
             "id": "talking-head",
             "name": "Portrait + speech audio → lip-synced clip (SadTalker)",
             "kind": "talking-head",
@@ -451,6 +472,11 @@ def capability_list() -> list[dict]:
             c["description"] = _CAP_DESCRIPTIONS[cid]
             c["enabled"] = CAPS.enabled(cid)
             settings = CAPS.settings(cid)
+            if cid == "text-to-image":
+                # The Mac parses the installed lanes out of settings
+                # (hub 136); informational, not writable.
+                settings = dict(settings)
+                settings["models"] = ",".join(_installed_image_models())
             if settings:
                 c["settings"] = settings
             # A disabled ability is still listed (so it can be
@@ -469,6 +495,16 @@ def capability_list() -> list[dict]:
 def _video_ready() -> bool:
     from . import video
     return video.ENGINE.ready()
+
+
+def _image_ready() -> bool:
+    from . import image
+    return image.ENGINE.ready()
+
+
+def _installed_image_models() -> list[str]:
+    from . import image
+    return image.ENGINE.installed_models()
 
 
 def _portrait_ready() -> bool:
@@ -492,7 +528,8 @@ def _measured(cap: str, field: str):
         elif field == "peak_vram_gb":
             peaks = [job.receipts.get("trellis_peak_vram_gb"),
                      job.receipts.get("lato_peak_vram_gb"),
-                     job.receipts.get("video_peak_vram_gb")]
+                     job.receipts.get("video_peak_vram_gb"),
+                     job.receipts.get("image_peak_vram_gb")]
             peaks = [p for p in peaks if p]
             if peaks:
                 samples.append(max(peaks))
@@ -507,6 +544,9 @@ def capabilities():
 
 
 def _require_enabled(cap: str) -> None:
+    from .serving import SERVING  # noqa: PLC0415
+    if SERVING.paused:
+        raise HTTPException(status_code=503, detail=SERVING.refusal())
     from .capsettings import CAPS  # noqa: PLC0415
     if not CAPS.enabled(cap):
         raise HTTPException(
@@ -514,6 +554,73 @@ def _require_enabled(cap: str) -> None:
             detail=f"The {cap} ability is currently disabled on this "
                    f"node. Re-enable it from the Swarm page or via "
                    f"POST /v1/capabilities/{cap}.")
+
+
+# The exact enable-flag sets behind each named profile (hub 138). The
+# chat capability is deliberately untouched — it has its own lifecycle
+# tier via /v1/llm.
+_JOB_CAPS = ("image-to-mesh", "retopologize", "text-to-video",
+             "text-to-image", "portrait-animate", "talking-head")
+_PROFILES = {
+    "images-only": {"text-to-image"},
+    "video-only": {"text-to-video", "portrait-animate", "talking-head"},
+    "everything": set(_JOB_CAPS),
+    "nothing": set(),
+}
+
+
+def _current_profile() -> Optional[str]:
+    from .capsettings import CAPS  # noqa: PLC0415
+    on = {c for c in _JOB_CAPS if CAPS.enabled(c)}
+    for name, want in _PROFILES.items():
+        if on == want:
+            return name
+    return None
+
+
+@app.get("/v1/serving")
+def serving_status():
+    from .serving import SERVING  # noqa: PLC0415
+    st = SERVING.status()
+    st["profile"] = _current_profile()
+    return st
+
+
+@app.post("/v1/serving")
+async def serving_update(request: Request):
+    """The owner's pause switch (hub 138): while paused, submissions and
+    member chats refuse with words, queued jobs finish, and /v1/node
+    stays readable with a serving.paused card."""
+    _require_operator(request, "Pausing or resuming the node")
+    from .serving import SERVING  # noqa: PLC0415
+    body = await request.json()
+    if not isinstance(body.get("paused"), bool):
+        raise HTTPException(status_code=400,
+                            detail='"paused" must be true or false.')
+    SERVING.set(body["paused"], body.get("reason"))
+    return serving_status()
+
+
+@app.post("/v1/capabilities/profile")
+async def capability_profile(request: Request):
+    """Named presets over the per-ability toggles (hub 138): one call
+    sets every job ability's enable flag atomically."""
+    _require_operator(request, "Switching the capability profile")
+    from .capsettings import CAPS  # noqa: PLC0415
+    body = await request.json()
+    name = str(body.get("name") or "")
+    if name not in _PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown profile {name!r}; this node offers "
+                   f"{', '.join(sorted(_PROFILES))}. The chat model is "
+                   "not part of profiles — manage it via /v1/llm.")
+    applied = {}
+    for cap in _JOB_CAPS:
+        want = cap in _PROFILES[name]
+        CAPS.update(cap, enabled=want)
+        applied[cap] = want
+    return {"ok": True, "profile": name, "applied": applied}
 
 
 @app.post("/v1/capabilities/{cap_id}")
@@ -941,6 +1048,10 @@ async def chat_completions_proxy(request: Request):
                    "/v1/llm/start or /v1/gguf/start.")
     actor = _actor(request)
     if actor not in ("admin", "node"):
+        from .serving import SERVING  # noqa: PLC0415
+        if SERVING.paused:
+            raise HTTPException(status_code=503,
+                                detail=SERVING.refusal())
         from .clients import CLIENTS  # noqa: PLC0415
         CLIENTS.count_llm(actor)
     body = await request.body()
@@ -1137,6 +1248,123 @@ async def text_to_video_submit(request: Request):
         job.params["image_path"] = str(job.dir / f"start{suffix}")
     STORE.enqueue(job)
     return {"job_id": job.job_id}
+
+
+@app.post("/v1/text-to-image")
+async def text_to_image_submit(request: Request):
+    """The Mac's NodeImageRuntime contract (hub 136): JSON {prompt,
+    width, height, steps?, seed?, negative_prompt?, model?} → {job_id};
+    poll GET /v1/jobs/{id}; result_urls carries the .png."""
+    body = await request.json()
+    from . import image as _image
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400,
+                            detail="A prompt is required.")
+    model = (body.get("model") or "").strip() or None
+    if model and model not in _image.MODEL_REPOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This node serves "
+                   f"{', '.join(sorted(_image.MODEL_REPOS))}; "
+                   f"{model} isn't one of them.")
+    installed = _image.ENGINE.installed_models()
+    if not installed:
+        raise HTTPException(
+            status_code=503,
+            detail="Image model weights are still installing on this "
+                   "node — try again in a few minutes.")
+    if model and model not in installed:
+        raise HTTPException(
+            status_code=503,
+            detail=f"The {model} weights are not installed on this node "
+                   "— install them from the model store, or omit the "
+                   f"model field to use {', '.join(installed)}.")
+    _require_enabled("text-to-image")
+    params = {"prompt": prompt,
+              "width": body.get("width", 1024),
+              "height": body.get("height", 1024),
+              "steps": body.get("steps"),
+              "seed": body.get("seed"),
+              "negative_prompt": body.get("negative_prompt"),
+              "model": model}
+    params = {k: v for k, v in params.items() if v is not None}
+    job = STORE.submit("text-to-image", params)
+    job.submitted_by = _submitter(request, "text-to-image")
+    job.save()
+    return {"job_id": job.job_id}
+
+
+@app.get("/v1/store")
+def store_list():
+    """Every model this node knows how to host (hub 137). Any bearer can
+    read it — members see what could be asked for."""
+    from . import modelstore  # noqa: PLC0415
+    return modelstore.listing()
+
+
+@app.post("/v1/store/install")
+async def store_install(request: Request):
+    _require_operator(request, "Installing models")
+    from . import modelstore  # noqa: PLC0415
+    body = await request.json()
+    mid = str(body.get("model_id") or "")
+    entry = modelstore._catalog().get(mid)
+    if entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No model named {mid!r} in this node's store — "
+                   "GET /v1/store lists what exists.")
+    if not entry["installable"]:
+        raise HTTPException(status_code=400, detail=entry["note"])
+    if modelstore._installed(entry):
+        return {"ok": True, "already_installed": True,
+                "detail": f"{entry['name']} is already installed."}
+    refusal = modelstore.disk_refusal(entry)
+    if refusal:
+        raise HTTPException(status_code=507, detail=refusal)
+    for j in STORE._jobs.values():
+        if (j.capability == "store-install" and j.state in
+                ("queued", "running") and j.params.get("model_id") == mid):
+            return {"ok": True, "job_id": j.job_id,
+                    "detail": "That install is already in the queue."}
+    job = STORE.submit("store-install", {"model_id": mid})
+    job.submitted_by = _submitter(request, "store-install")
+    job.save()
+    modelstore._record("installs", mid, _actor(request))
+    return {"job_id": job.job_id}
+
+
+@app.delete("/v1/store/{model_id}")
+def store_delete(model_id: str, request: Request):
+    _require_operator(request, "Deleting models")
+    from . import modelstore  # noqa: PLC0415
+    entry = modelstore._catalog().get(model_id)
+    if entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No model named {model_id!r} in this node's store.")
+    if not modelstore._installed(entry):
+        return {"ok": True, "already_absent": True,
+                "detail": f"{entry['name']} is not installed."}
+    for j in STORE._jobs.values():
+        if j.state not in ("queued", "running"):
+            continue
+        if j.capability == entry["capability"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A {entry['capability']} job is queued or "
+                       "running and may need these weights — wait for "
+                       "the queue to drain, then delete.")
+        if (j.capability == "store-install"
+                and j.params.get("model_id") == model_id):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{entry['name']} is being installed right now — "
+                       "cancel that job first if you want it gone.")
+    freed = modelstore.delete(model_id)
+    modelstore._record("deletes", model_id, _actor(request))
+    return {"ok": True, "freed_bytes": freed}
 
 
 @app.post("/v1/portrait-animate")
@@ -1350,10 +1578,17 @@ def node():
     if consumer:
         met["gpu_consumer"] = consumer
     from .llm import PROFILES as _LLM_PROFILES  # noqa: PLC0415
+    from .serving import SERVING  # noqa: PLC0415
+    serving = SERVING.status()
+    # NOTE for clients: the top-level "profile" is the GPU hardware
+    # profile (predates hub 138); the capability preset lives at
+    # serving.profile.
+    serving["profile"] = _current_profile()
     return {
         "name": config.SERVER_NAME,
         "platform": config.PLATFORM,
         "profile": _gpu_profile(),
+        "serving": serving,
         "capabilities": capability_list(),
         "metrics": met,
         "queue": _queue_view(),
@@ -1379,7 +1614,9 @@ def _gpu_consumer(met: dict) -> Optional[str]:
     cur = STORE._current
     if cur:
         j = STORE.get(cur)
-        if j is not None:
+        # Store installs are downloads, not GPU tenants — fall through
+        # so the caption names whatever actually owns the card.
+        if j is not None and j.capability != "store-install":
             return f"job:{j.capability}"
     if LLM.running:
         return "llm"
@@ -1535,6 +1772,10 @@ def create_app() -> FastAPI:
     STORE.register("retopologize", pipeline.retopologize)
     from . import video
     STORE.register("text-to-video", video.text_to_video)
+    from . import image
+    STORE.register("text-to-image", image.text_to_image)
+    from . import modelstore
+    STORE.register("store-install", modelstore.install_job)
     from . import portrait
     STORE.register("portrait-animate", portrait.portrait_animate)
     from . import talkinghead

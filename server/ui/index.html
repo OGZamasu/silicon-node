@@ -261,6 +261,9 @@ a.dl:hover { text-decoration: underline; }
   <button class="navbtn" data-p="images" onclick="go('images')">
     <svg viewBox="0 0 16 16" fill="none"><rect x="1.5" y="3" width="11" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M14.5 5v6.5a1.5 1.5 0 01-1.5 1.5H5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><path d="M2 10.5l3-2.5 2.5 2 2-1.5 3 2.5" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
     Images</button>
+  <button class="navbtn" data-p="store" onclick="go('store')">
+    <svg viewBox="0 0 16 16" fill="none"><path d="M2 5.5l1-3h10l1 3M2 5.5v7A1.5 1.5 0 003.5 14h9a1.5 1.5 0 001.5-1.5v-7M2 5.5h12" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M6 8h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    Store</button>
   <button class="navbtn" data-p="three" onclick="go('three')">
     <svg viewBox="0 0 16 16" fill="none"><path d="M8 1.5l5.6 3.2v6.6L8 14.5l-5.6-3.2V4.7L8 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-dasharray="2.2 1.6"/><path d="M8 8l5.6-3.3M8 8L2.4 4.7M8 8v6.5" stroke="currentColor" stroke-width="1.1"/></svg>
     3D</button>
@@ -306,6 +309,11 @@ a.dl:hover { text-decoration: underline; }
       </div>
     </div>
     <div class="col">
+      <div class="card">
+        <div class="card-title"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3"/><path d="M6.2 5.5v5M9.8 5.5v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          Serving</div>
+        <div id="serving-card"></div>
+      </div>
       <div class="card">
         <div class="card-title"><svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="3" r="1.6" stroke="currentColor" stroke-width="1.2"/><circle cx="3" cy="12" r="1.6" stroke="currentColor" stroke-width="1.2"/><circle cx="13" cy="12" r="1.6" stroke="currentColor" stroke-width="1.2"/><path d="M7 4.4L4 10.6M9 4.4l3 6.2M4.6 12h6.8" stroke="currentColor" stroke-width="1.2"/></svg>
           Swarm</div>
@@ -389,6 +397,16 @@ a.dl:hover { text-decoration: underline; }
   models load through ninfer-3090 or llama.cpp; fit is stated before you
   commit — a tight one warns, it doesn't refuse.</p>
   <section style="margin-bottom:18px">
+    <h2>Serving profile</h2>
+    <div class="controls">
+      <button onclick="profileSet('everything')">Everything</button>
+      <button onclick="profileSet('images-only')">Images only</button>
+      <button onclick="profileSet('video-only')">Video only</button>
+      <button onclick="profileSet('nothing')">Nothing</button>
+      <span class="imgout" id="profile-now" style="font-size:12px"></span>
+    </div>
+  </section>
+  <section style="margin-bottom:18px">
     <h2>On this node</h2>
     <div class="rows" id="node-model-rows">
       <div class="empty">Taking inventory…</div>
@@ -421,16 +439,44 @@ a.dl:hover { text-decoration: underline; }
 
 <div class="page" id="p-images">
   <h1>Images</h1>
-  <p class="lede">This box has no image model installed yet, so generation is
-  delegated across the swarm to the Mac's FLUX. A Windows-local pipeline is
-  on the roadmap.</p>
+  <p class="lede">Rendered right here on the 3090 Ti. Qwen-Image is the
+  quality lane (it can put readable text in images); Sana renders in
+  seconds for iteration. A running language model steps aside
+  automatically and comes back when the render finishes.</p>
   <textarea id="img-prompt" rows="3" style="width:100%"
     placeholder="Describe the image…"></textarea>
   <div class="controls" style="margin-top:12px">
-    <button class="primary" id="img-go">Generate on the Mac</button>
+    <select id="img-model"><option value="">(no image model yet)</option></select>
+    <select id="img-size">
+      <option value="1024x1024">1024 × 1024</option>
+      <option value="1280x768">1280 × 768</option>
+      <option value="768x1280">768 × 1280</option>
+      <option value="1536x1024">1536 × 1024</option>
+    </select>
+    <input type="text" id="img-seed" placeholder="seed" style="width:90px">
+    <button class="primary" id="img-go" onclick="imgGo()">Generate</button>
     <span id="img-status" class="imgout"></span>
   </div>
   <div id="img-out"></div>
+</div>
+
+<div class="page" id="p-store">
+  <h1>Store</h1>
+  <p class="lede">Every model this node knows how to host. The recommended
+  set installs by default; everything else is a deliberate download. The
+  Mac's Swarm page drives the same store remotely.</p>
+  <div class="card">
+    <div class="card-title"><svg viewBox="0 0 16 16" fill="none"><rect x="1.5" y="4" width="13" height="8" rx="1.5" stroke="currentColor" stroke-width="1.3"/></svg>
+      Disk</div>
+    <div class="imgout" id="store-disk" style="font-size:12px">—</div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="rows" id="store-rows"><div class="empty">Reading the
+      store…</div></div>
+    <div class="caption">Installs run through the job queue — progress and
+    ETA show under Activity, and chat keeps running through a download.
+    Deleting frees the disk; the ability flips ready again on reinstall.</div>
+  </div>
 </div>
 
 <div class="page" id="p-three">
@@ -548,6 +594,7 @@ async function poll() {
           at: Date.now() / 1000 };
   } catch (e) { S = { ok: false, error: String(e) }; }
   render();
+  renderServing();
 }
 setInterval(poll, 2500);
 
@@ -1109,23 +1156,190 @@ function renderGguf() {
   if (rows.length) $("#gguf-rows").innerHTML = rows.join("");
 }
 
-/* ---------- images ---------- */
-$("#img-go").onclick = async () => {
+/* ---------- images (local text-to-image lane, hub 136) ---------- */
+let IMG_JOB = null;
+async function imgGo() {
   const prompt = $("#img-prompt").value.trim();
   if (!prompt) return;
-  const btn = $("#img-go"), st = $("#img-status");
-  btn.disabled = true;
-  st.innerHTML = `<span class="spin"></span>asking the Mac…`;
+  const body = { prompt };
+  const model = $("#img-model").value;
+  if (model) body.model = model;
+  const [w, h] = $("#img-size").value.split("x").map(Number);
+  body.width = w; body.height = h;
+  const seed = $("#img-seed").value.trim();
+  if (seed) body.seed = Number(seed);
+  $("#img-go").disabled = true;
+  $("#img-status").innerHTML = `<span class="spin"></span>queued…`;
   try {
-    const r = await j("/v1/swarm/image", { method: "POST",
+    const r = await j("/v1/text-to-image", { method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }) });
-    st.textContent = `Submitted to ${r.peer} — job ${r.job_id || JSON.stringify(r)}`;
+      body: JSON.stringify(body) });
+    IMG_JOB = r.job_id;
+    imgPoll();
   } catch (e) {
-    st.textContent = String(e).replace("Error: ", "").slice(0, 220);
+    $("#img-status").textContent =
+      String(e).replace("Error: ", "").slice(0, 220);
+    $("#img-go").disabled = false;
   }
-  btn.disabled = false;
-};
+}
+async function imgPoll() {
+  if (!IMG_JOB) return;
+  try {
+    const d = await j(`/v1/jobs/${IMG_JOB}`);
+    if (d.status === "done") {
+      $("#img-status").textContent = `done in ${hms(d.elapsed_s || 0)}`;
+      $("#img-out").innerHTML = (d.result_urls || []).map(u =>
+        `<img src="${u}" style="max-width:100%; border-radius:10px;
+           margin-top:14px; cursor:zoom-in" onclick="preview('${u}')">`)
+        .join("");
+      $("#img-go").disabled = false; IMG_JOB = null; return;
+    }
+    if (d.status === "failed") {
+      $("#img-status").textContent = d.error || "failed";
+      $("#img-go").disabled = false; IMG_JOB = null; return;
+    }
+    const pct = d.progress != null
+      ? ` ${(d.progress * 100).toFixed(0)}%` : "";
+    const stage = d.stage ? ` — ${d.stage}` : "";
+    const eta = d.eta_seconds != null
+      ? `, ~${hms(d.eta_seconds)} left` : "";
+    $("#img-status").innerHTML =
+      `<span class="spin"></span>running${pct}${esc(stage)}${eta}`;
+  } catch { /* transient; keep polling */ }
+  setTimeout(imgPoll, 2000);
+}
+
+/* ---------- model store (hub 137) ---------- */
+let STOREV = null, confirmStoreDel = null;
+const INSTALLING = {};   // model_id -> job_id we submitted this session
+async function pollStore() {
+  try { STOREV = await j("/v1/store"); } catch { STOREV = null; }
+  renderStore();
+}
+function renderStore() {
+  const el = $("#store-rows");
+  if (!el) return;
+  // Refresh the Images pane's model picker from the same listing.
+  const sel = $("#img-model");
+  if (sel && STOREV) {
+    const opts = STOREV.models.filter(m =>
+      m.capability === "text-to-image" && m.installed);
+    const cur = sel.value;
+    sel.innerHTML = opts.length
+      ? opts.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join("")
+      : `<option value="">(no image model yet)</option>`;
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+  if (!STOREV) {
+    el.innerHTML = `<div class="empty">The service is offline.</div>`;
+    return;
+  }
+  const g = STOREV.disk_free_bytes / 1e9;
+  const w = (STOREV.disk_free_windows_bytes || 0) / 1e9;
+  $("#store-disk").textContent =
+    `${g.toFixed(0)} GB free inside the node · ${w.toFixed(0)} GB free ` +
+    `on the Windows drive (installs keep a reserve on both)`;
+  el.innerHTML = STOREV.models.map(m => {
+    const dot = m.installed ? "ok" : "no";
+    const size = `${(m.size_bytes / 1e9).toFixed(0)} GB` +
+      (m.size_is_estimate ? " est." : "");
+    const busy = INSTALLING[m.id] ? `<span class="num">installing —
+      watch Activity</span>` : "";
+    let act = "";
+    if (m.installed) {
+      act = confirmStoreDel === m.id
+        ? `<button class="danger" onclick="storeDelete('${m.id}')">Really delete — frees ${(m.size_bytes / 1e9).toFixed(0)} GB</button>`
+        : `<button class="danger" onclick="confirmStoreDel = '${m.id}'; renderStore()">Delete</button>`;
+    } else if (INSTALLING[m.id]) {
+      act = busy;
+    } else if (m.installable) {
+      act = `<button class="primary" onclick="storeInstall('${m.id}')">Install</button>`;
+    }
+    const rec = m.recommended
+      ? `<span class="num good" style="margin-left:8px">recommended</span>` : "";
+    return `<div class="row">
+      <span class="dot ${dot}"></span>
+      <div class="grow"><div class="name">${esc(m.name)}${rec}</div>
+        <div class="sub">${esc(m.capability)} · ${size} ·
+          ${esc(m.license)}<br>${esc(m.note)}</div></div>
+      ${act}
+    </div>`;
+  }).join("");
+}
+async function storeInstall(id) {
+  try {
+    const r = await j("/v1/store/install", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_id: id }) });
+    if (r.job_id) INSTALLING[id] = r.job_id;
+  } catch (e) { alert(String(e).slice(0, 300)); }
+  renderStore(); poll();
+}
+async function storeDelete(id) {
+  confirmStoreDel = null;
+  try { await j(`/v1/store/${encodeURIComponent(id)}`,
+    { method: "DELETE" }); }
+  catch (e) { alert("Couldn't delete: " + String(e).slice(0, 300)); }
+  pollStore(); pollInventory();
+}
+setInterval(() => {
+  // Track our installs to completion so the row flips to installed.
+  Object.entries(INSTALLING).forEach(async ([mid, jid]) => {
+    try {
+      const d = await j(`/v1/jobs/${jid}`);
+      if (d.status === "done" || d.status === "failed") {
+        delete INSTALLING[mid];
+        if (d.status === "failed" && d.error) alert(
+          `Install of ${mid} failed: ${d.error.slice(0, 200)}`);
+        pollStore();
+      }
+    } catch { /* transient */ }
+  });
+}, 5000);
+
+/* ---------- serving switch + profiles (hub 138) ---------- */
+function renderServing() {
+  const el = $("#serving-card");
+  if (!el) return;
+  const sv = (S.node && S.node.serving) || null;
+  const pn = $("#profile-now");
+  if (pn && sv) pn.textContent = sv.profile
+    ? `current: ${sv.profile}` : "current: custom mix";
+  if (el.contains(document.activeElement)) return; // typing a reason
+  if (!sv) { el.innerHTML = `<div class="empty">—</div>`; return; }
+  el.innerHTML = sv.paused
+    ? `<div style="font-size:13px; margin-bottom:6px">
+         <b style="color:var(--yellow)">Paused</b>
+         ${sv.reason ? "— " + esc(sv.reason) : ""}</div>
+       <div class="caption">New jobs and member chats get a readable
+         refusal; queued jobs finish; the swarm sees an honest paused
+         card.</div>
+       <button class="primary" onclick="servingSet(false)">Resume serving</button>`
+    : `<div style="font-size:13px; margin-bottom:6px">
+         <b style="color:var(--green)">Serving</b>
+         ${sv.profile ? `· profile: ${esc(sv.profile)}` : ""}</div>
+       <div style="display:flex; gap:8px">
+         <input type="text" id="pause-reason" placeholder="reason (optional)"
+           style="flex:1">
+         <button onclick="servingSet(true)">Pause</button>
+       </div>`;
+}
+async function servingSet(paused) {
+  const r = $("#pause-reason");
+  const reason = (r && r.value) || "";
+  try { await j("/v1/serving", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paused, reason }) }); }
+  catch (e) { alert(String(e).slice(0, 220)); }
+  poll();
+}
+async function profileSet(name) {
+  try { await j("/v1/capabilities/profile", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }) }); }
+  catch (e) { alert(String(e).slice(0, 220)); }
+  await poll(); renderNodeModels();
+}
 
 /* ---------- 3D ---------- */
 $("#job-kind").onchange = () => {
@@ -1458,6 +1672,8 @@ setInterval(() => {
 }, 1000);
 route();
 poll();
+pollStore();
+setInterval(pollStore, 15000);
 </script>
 </body>
 </html>
