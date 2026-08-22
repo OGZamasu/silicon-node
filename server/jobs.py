@@ -96,7 +96,10 @@ class Job:
 
     def save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.dir / "status.json.tmp"
+        # Per-thread tmp name: the submitting API thread and the worker
+        # can save concurrently, and a shared tmp made one of them
+        # replace the other's already-moved file (FileNotFoundError).
+        tmp = self.dir / f"status.json.{threading.get_ident()}.tmp"
         tmp.write_text(json.dumps(self.to_disk(), indent=2, default=str))
         tmp.replace(self.dir / "status.json")
 
