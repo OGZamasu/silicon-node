@@ -14,6 +14,7 @@ Phase 2:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import subprocess
@@ -926,7 +927,6 @@ async def chat_completions_proxy(request: Request):
     which WSL sockets cannot reach — interop curl bridges it, streaming
     included. Clients that should be counted point at :8790/v1 instead
     of the engine port; the engine ports keep working unchanged."""
-    import asyncio  # noqa: PLC0415
     import os  # noqa: PLC0415
     import uuid  # noqa: PLC0415
     from .llamacpp import LLAMACPP, PORT as GGUF_PORT  # noqa: PLC0415
@@ -949,11 +949,19 @@ async def chat_completions_proxy(request: Request):
     win_tmp = os.environ.get("SILICON_NODE_WIN_TMP", r"C:\Windows\Temp")
     wsl_tmp = Path("/mnt/" + win_tmp[0].lower()
                    + win_tmp[2:].replace("\\", "/")) / "silicon-chat"
-    wsl_tmp.mkdir(parents=True, exist_ok=True)
     name = f"{uuid.uuid4().hex}.json"
-    (wsl_tmp / name).write_bytes(body)
+
+    def _spool():  # drvfs I/O can stall — never run it on the event loop
+        wsl_tmp.mkdir(parents=True, exist_ok=True)
+        (wsl_tmp / name).write_bytes(body)
+    await asyncio.to_thread(_spool)
+    # Guards (hub 135): a stuck engine must cost one chat, never the node.
+    # --connect-timeout bounds the dial; -m caps the whole exchange; the
+    # pump's idle timeout below catches an engine that answers then hangs
+    # (non-stream bodies arrive all at once, so idle stays generous).
     proc = await asyncio.create_subprocess_exec(
         "/mnt/c/Windows/System32/curl.exe", "-s", "-N", "-X", "POST",
+        "--connect-timeout", "10", "-m", "1800",
         f"http://127.0.0.1:{port}/v1/chat/completions",
         "-H", "Content-Type: application/json",
         "--data-binary", "@" + win_tmp + "\\silicon-chat\\" + name,
@@ -963,14 +971,21 @@ async def chat_completions_proxy(request: Request):
     async def pump():
         try:
             while True:
-                chunk = await proc.stdout.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(
+                        proc.stdout.read(4096), timeout=600)
+                except asyncio.TimeoutError:
+                    log.warning("chat bridge idle >600s; dropping this "
+                                "chat (engine stuck or unreachable)")
+                    break
                 if not chunk:
                     break
                 yield chunk
         finally:
-            (wsl_tmp / name).unlink(missing_ok=True)
             if proc.returncode is None:
                 proc.kill()
+            await asyncio.to_thread(
+                (wsl_tmp / name).unlink, missing_ok=True)
 
     from fastapi.responses import StreamingResponse  # noqa: PLC0415
     return StreamingResponse(
@@ -1017,12 +1032,16 @@ async def llm_start(request: Request):
             status_code=409,
             detail="A GPU job is queued or running; the LLM will not start "
                    "until the job queue drains. Try again shortly.")
-    try:
+    def _switch():
         if LLM.running:
             LLM.stop()  # switching model/profile/context
         pipeline.ENGINE.unload()
         LLM.start(profile, model_file=model_file,
                   context_length=context_length)
+    try:
+        # start() blocks up to ~3 min waiting healthy; on the event loop
+        # that froze every route for the duration (hub 135).
+        await asyncio.to_thread(_switch)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from None
     return LLM.status()
@@ -1249,13 +1268,16 @@ async def gguf_start(request: Request):
         raise HTTPException(
             status_code=409,
             detail="A GPU job is queued or running; try again shortly.")
-    try:
+    def _switch():
         if LLM.running:
             LLM.stop()  # one language engine at a time on this card
         pipeline.ENGINE.unload()
         ctx = body.get("context")
         LLAMACPP.start(body.get("file", ""),
                        int(ctx) if ctx is not None else None)
+    try:
+        # Same event-loop guard as /v1/llm/start (hub 135).
+        await asyncio.to_thread(_switch)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from None
     return LLAMACPP.status()
