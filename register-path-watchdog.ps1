@@ -21,5 +21,9 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
 Register-ScheduledTask -TaskName "SiliconNode Path Watchdog" -Action $action `
     -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
+# Retire the unelevated fallback task if one was registered before this.
+Unregister-ScheduledTask -TaskName "SiliconNode Path Watchdog (user)" `
+    -Confirm:$false -ErrorAction SilentlyContinue
+
 Write-Host "Registered 'SiliconNode Path Watchdog' (SYSTEM, every 5 min)."
 Write-Host "Log: $(Join-Path (Split-Path $PSScriptRoot -Parent) 'node-path-watchdog.log')"
