@@ -5,7 +5,8 @@ from pathlib import Path
 
 SERVER_NAME = "silicon-node"
 SERVER_VERSION = "0.1.0"
-PLATFORM = "windows-wsl2-cuda"
+from .hostos import IS_WSL as _IS_WSL  # noqa: E402
+PLATFORM = "windows-wsl2-cuda" if _IS_WSL else "linux-cuda"
 
 # Paths (inside WSL)
 DATA_DIR = Path(os.environ.get("SILICON_NODE_DATA", "/opt/silicon/data"))

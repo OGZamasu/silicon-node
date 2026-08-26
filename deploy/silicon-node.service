@@ -1,0 +1,17 @@
+# Silicon Node systemd unit (Linux). scripts/setup-linux.sh installs this
+# to /etc/systemd/system/silicon-node.service with the paths below;
+# adjust Environment lines if your layout differs.
+[Unit]
+Description=Silicon Node CUDA job service
+After=network.target
+
+[Service]
+LimitNOFILE=1048576
+Type=simple
+Environment=SILICON_NODE_VENV=/opt/silicon/venv
+ExecStart=/bin/bash /opt/silicon/silicon-node/run-server.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

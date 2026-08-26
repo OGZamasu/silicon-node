@@ -32,21 +32,29 @@ PROVIDER_ID = "silicon-local"
 API_KEY_VAR = "SILICON_LOCAL_API_KEY"
 WEB_PORT = int(os.environ.get("SILICON_NODE_DSH_PORT", "8090"))
 
-_RUNTIME = Path("/mnt/f/Windows Silicon Optimizer/silicon-node/runtime")
-NODE_EXE = _RUNTIME / "node" / "node.exe"
+from . import hostos
+
+_RUNTIME = Path(os.environ.get(
+    "SILICON_NODE_RUNTIME",
+    "/mnt/f/Windows Silicon Optimizer/silicon-node/runtime"
+    if hostos.IS_WSL
+    else str(Path(__file__).resolve().parent.parent / "runtime")))
+NODE_EXE = _RUNTIME / "node" / ("node.exe" if hostos.IS_WSL
+                                else "bin/node")
 DSH_PKG = _RUNTIME / "dsh" / "node_modules" / "@deepseek-ai" / "dsh"
 DSH_HOME_WSL = _RUNTIME / "dsh-home"
-DSH_HOME_WIN = r"F:\Windows Silicon Optimizer\silicon-node\runtime\dsh-home"
 
 
-_DSH_PKG_WIN = (r"F:\Windows Silicon Optimizer\silicon-node\runtime\dsh"
-                r"\node_modules\@deepseek-ai\dsh")
+def _engine_path(p: Path) -> str:
+    """A path as the NODE PROCESS must see it — Windows form through
+    interop on WSL, POSIX on Linux."""
+    return hostos.win_path(p) if hostos.IS_WSL else str(p)
 
 
 def _dsh_entry_win() -> str | None:
-    """The package's bin script as a WINDOWS path: interop translates the
-    executable path but never the arguments, and node.exe is a Windows
-    process that cannot open /mnt/f/… forms."""
+    """The package's bin script as the node process must see it (see
+    _engine_path — interop translates the executable path but never the
+    arguments)."""
     import json  # noqa: PLC0415
     pj = DSH_PKG / "package.json"
     if not pj.is_file():
@@ -59,7 +67,9 @@ def _dsh_entry_win() -> str | None:
         return None
     if not (DSH_PKG / rel).is_file():
         return None
-    return _DSH_PKG_WIN + "\\" + rel.replace("/", "\\")
+    if hostos.IS_WSL:
+        return hostos.win_path(DSH_PKG) + "\\" + rel.replace("/", "\\")
+    return str(DSH_PKG / rel)
 
 
 def _settings_yaml(model_id: str, model_name: str, context: int) -> str:
@@ -99,15 +109,9 @@ class HarnessManager:
         now = time.time()
         if max_age and self._probe and now - self._probe[0] < max_age:
             return self._probe[1]
-        try:
-            out = subprocess.run(
-                ["/mnt/c/Windows/System32/curl.exe", "-s", "-m",
-                 str(int(timeout)), "-o", "NUL", "-w", "%{http_code}",
-                 f"http://127.0.0.1:{WEB_PORT}/"],
-                capture_output=True, text=True, timeout=timeout + 4)
-            ok = out.stdout.strip().startswith(("2", "3"))
-        except Exception:  # noqa: BLE001
-            ok = False
+        ok = hostos.http_status(
+            f"http://127.0.0.1:{WEB_PORT}/",
+            timeout).startswith(("2", "3"))
         self._probe = (now, ok)
         return ok
 
@@ -143,11 +147,12 @@ class HarnessManager:
                 _settings_yaml(model_id, f"{model_id} (this PC)", context))
 
             env = dict(os.environ)
-            env["DSH_HOME"] = DSH_HOME_WIN
+            env["DSH_HOME"] = _engine_path(DSH_HOME_WSL)
             env[API_KEY_VAR] = "local"
-            # Only WSLENV-listed variables cross the interop boundary.
-            env["WSLENV"] = (env.get("WSLENV", "").rstrip(":") +
-                             f":DSH_HOME:{API_KEY_VAR}").lstrip(":")
+            if hostos.IS_WSL:
+                # Only WSLENV-listed variables cross the interop boundary.
+                env["WSLENV"] = (env.get("WSLENV", "").rstrip(":") +
+                                 f":DSH_HOME:{API_KEY_VAR}").lstrip(":")
             log.info("starting dsh web on :%d (model %s)…", WEB_PORT,
                      model_id)
             self._kill_instances()
@@ -190,18 +195,26 @@ class HarnessManager:
 
     @staticmethod
     def _kill_instances() -> None:
-        """Kill only *our* node.exe (the dsh entry in its command line) —
-        never a bare taskkill /IM node.exe, the user runs Node too."""
-        script = ("Get-CimInstance Win32_Process -Filter \"Name='node.exe'\""
-                  " | Where-Object { $_.CommandLine -match 'deepseek-ai' }"
-                  " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+        """Kill only *our* node (the dsh entry in its command line) —
+        never every node process, the user runs Node too."""
         try:
-            subprocess.run(
-                ["/mnt/c/Windows/System32/WindowsPowerShell/v1.0/"
-                 "powershell.exe", "-NoProfile", "-Command", script],
-                capture_output=True, timeout=30)
+            if hostos.IS_WSL:
+                script = (
+                    "Get-CimInstance Win32_Process -Filter "
+                    "\"Name='node.exe'\""
+                    " | Where-Object { $_.CommandLine -match 'deepseek-ai' }"
+                    " | ForEach-Object "
+                    "{ Stop-Process -Id $_.ProcessId -Force }")
+                subprocess.run(
+                    ["/mnt/c/Windows/System32/WindowsPowerShell/v1.0/"
+                     "powershell.exe", "-NoProfile", "-Command", script],
+                    capture_output=True, timeout=30)
+            else:
+                subprocess.run(
+                    ["pkill", "-f", "deepseek-ai/dsh"],
+                    capture_output=True, timeout=20)
         except Exception:  # noqa: BLE001
-            log.exception("harness taskkill failed")
+            log.exception("harness kill failed")
 
 
 HARNESS = HarnessManager()

@@ -1,0 +1,5 @@
+# Shell scripts and systemd units must stay LF — a CRLF checkout on
+# Windows breaks them the moment they reach WSL or a Linux box.
+*.sh text eol=lf
+*.service text eol=lf
+*.jinja text eol=lf

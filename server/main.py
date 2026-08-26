@@ -793,9 +793,14 @@ def model_reveal(model_id: str):
         raise HTTPException(status_code=404,
                             detail=f"No model named {model_id!r}.")
     target = adm["loc"] if adm["kind"] != "file" else adm["loc"].parent
-    win = _win_visible(Path(target))
-    subprocess.Popen(["/mnt/c/Windows/explorer.exe", win])
-    return {"ok": True, "path": win}
+    from .hostos import IS_WSL  # noqa: PLC0415
+    if IS_WSL:
+        win = _win_visible(Path(target))
+        subprocess.Popen(["/mnt/c/Windows/explorer.exe", win])
+        return {"ok": True, "path": win}
+    subprocess.Popen(["xdg-open", str(target)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "path": str(target)}
 
 
 @app.delete("/v1/models/{model_id}")
@@ -1056,10 +1061,8 @@ async def chat_completions_proxy(request: Request):
         CLIENTS.count_llm(actor)
     body = await request.body()
     stream = b'"stream": true' in body or b'"stream":true' in body
-    # Windows curl reads a Windows path (interop passes argv verbatim).
-    win_tmp = os.environ.get("SILICON_NODE_WIN_TMP", r"C:\Windows\Temp")
-    wsl_tmp = Path("/mnt/" + win_tmp[0].lower()
-                   + win_tmp[2:].replace("\\", "/")) / "silicon-chat"
+    from .hostos import bridge_curl_argv, chat_spool_dir  # noqa: PLC0415
+    wsl_tmp = chat_spool_dir()
     name = f"{uuid.uuid4().hex}.json"
 
     def _spool():  # drvfs I/O can stall — never run it on the event loop
@@ -1071,11 +1074,8 @@ async def chat_completions_proxy(request: Request):
     # pump's idle timeout below catches an engine that answers then hangs
     # (non-stream bodies arrive all at once, so idle stays generous).
     proc = await asyncio.create_subprocess_exec(
-        "/mnt/c/Windows/System32/curl.exe", "-s", "-N", "-X", "POST",
-        "--connect-timeout", "10", "-m", "1800",
-        f"http://127.0.0.1:{port}/v1/chat/completions",
-        "-H", "Content-Type: application/json",
-        "--data-binary", "@" + win_tmp + "\\silicon-chat\\" + name,
+        *bridge_curl_argv(f"http://127.0.0.1:{port}/v1/chat/completions",
+                          wsl_tmp / name),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL)
 
@@ -1713,8 +1713,9 @@ def _gpu_profile() -> dict:
             break
     try:
         import shutil as _sh
+        from .hostos import IS_WSL as _wsl  # noqa: PLC0415
         prof["disk_free_gb"] = round(
-            _sh.disk_usage("/mnt/f").free / 1e9)
+            _sh.disk_usage("/mnt/f" if _wsl else "/").free / 1e9)
     except OSError:
         pass
     return prof

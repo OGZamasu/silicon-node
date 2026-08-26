@@ -1,0 +1,14 @@
+# text-to-image + text-to-video lanes (Qwen-Image/Sana/SDXL, Wan/LTX).
+# Install torch FIRST with the CUDA index for your driver, e.g.:
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# transformers is PINNED: 5.x renames DINOv3 internals and breaks
+# TRELLIS.2's extractor ("no attribute 'layer'").
+torch==2.6.0
+diffusers==0.39.0
+transformers==4.57.1
+accelerate==1.14.0
+bitsandbytes==0.50.1
+safetensors>=0.4
+pillow>=10
+imageio>=2.34
+imageio-ffmpeg>=0.5

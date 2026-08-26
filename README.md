@@ -30,7 +30,8 @@ and who asked for it.
 - **An NVIDIA GPU.** 24 GB of VRAM (3090 / 4090 class) runs everything.
   Smaller card? Just install fewer abilities — each one is optional.
 - **RAM:** 64 GB is ideal. 32 GB works if you skip the biggest video model.
-- **Windows 10 or 11** with WSL2.
+- **Windows 10 or 11** with WSL2 — or any **Linux** with the NVIDIA
+  driver (the same service runs natively; see "On Linux" below).
 - **Disk:** about 250 GB if you want every model.
 
 ## Get it
@@ -46,6 +47,26 @@ unzip it, run `install.ps1`.
 That's the app. The AI models are a separate, bigger download — the
 [setup guide](docs/PROVISIONING.md) walks you through them **one ability
 at a time**. You can stop after any section and have a working node.
+
+## On Linux
+
+The node is the same codebase on Linux — no WSL layer, engines talk over
+plain sockets. On a CUDA box:
+
+```bash
+git clone https://github.com/OGZamasu/silicon-node
+cd silicon-node
+sudo bash scripts/setup-linux.sh --media --ninfer --ninfer-model
+```
+
+Flags are opt-in so you download only what you want: `--media` adds the
+image/video pipelines, `--ninfer` the chat engine, `--ninfer-model` its
+Qwen3.8-27B weights (~17 GB). The service lands under `/opt/silicon`,
+runs via systemd, and serves the same dashboard at
+`http://<host>:8790/ui`. Image, video, and 3D model weights install
+afterwards from the dashboard's **Store** page — same store, same
+recommended set as the Windows node. The GGUF lane (llama.cpp) works
+too: the engine fetches itself on first use.
 
 ## Join your swarm
 

@@ -26,11 +26,15 @@ from pathlib import Path
 
 log = logging.getLogger("silicon-node.llm")
 
+from . import hostos
+
 NINFER_DIR = Path(os.environ.get(
     "NINFER_DIR",
     "/mnt/f/Windows Silicon Optimizer/ninfer-3090/dist/"
-    "ninfer-rtx3090-windows-x64-0.6.0-rtx3090"))
-NINFER_EXE = NINFER_DIR / "ninfer-serve.exe"
+    "ninfer-rtx3090-windows-x64-0.6.0-rtx3090"
+    if hostos.IS_WSL else "/opt/silicon/ninfer"))
+NINFER_EXE = NINFER_DIR / (
+    "ninfer-serve.exe" if hostos.IS_WSL else "ninfer-serve")
 MODEL_FILE = NINFER_DIR / "models" / "qwen3_8_27b.ninfer"
 MODEL_ID = "qwen3.8-27b"
 # 8080 is taken by sftpgo on this machine; ninfer lives on 8081.
@@ -40,9 +44,11 @@ PORT = int(os.environ.get("NINFER_PORT", "8081"))
 PUBLIC_HOST = os.environ.get("SILICON_NODE_PUBLIC_HOST", "127.0.0.1")
 AUTOSTART = os.environ.get("SILICON_NODE_LLM_AUTOSTART", "1") != "0"
 
-# Windows paths as the exe needs to see them (interop passes argv through).
-_WIN_MODEL = r"F:\Windows Silicon Optimizer\ninfer-3090\dist" \
-    r"\ninfer-rtx3090-windows-x64-0.6.0-rtx3090\models\qwen3_8_27b.ninfer"
+def _engine_path_arg(p: Path) -> str:
+    """A path as the ENGINE must see it: on WSL the exe is a Windows
+    process and interop passes argv verbatim, so translate to F:\...;
+    on Linux the POSIX path is already the truth."""
+    return hostos.win_path(p) if hostos.IS_WSL else str(p)
 
 # Profile sizing is a measured trade (silicon-optimizer #11): the old c1
 # asked for a 64K context envelope with 1024-token prefill chunks, which
@@ -130,16 +136,8 @@ def _store_context(model_id: str, ctx: int) -> None:
 
 
 def _windows_host_ip() -> str:
-    """The Windows host as seen from WSL2 (NAT default gateway)."""
-    try:
-        out = subprocess.run(["sh", "-c", "ip route | awk '/^default/ {print $3; exit}'"],
-                             capture_output=True, text=True, timeout=5)
-        ip = out.stdout.strip()
-        if ip:
-            return ip
-    except Exception:  # noqa: BLE001
-        pass
-    return "127.0.0.1"
+    """Source IP that means "forwarded" (see hostos.proxy_ip)."""
+    return hostos.proxy_ip()
 
 
 class LlmManager:
@@ -174,20 +172,12 @@ class LlmManager:
         return self._proc is not None and self._proc.poll() is None
 
     def healthy(self, timeout: float = 4.0) -> bool:
-        """Probe via Windows curl.exe through interop: the engine binds
-        Windows loopback, which WSL cannot reach over the NAT gateway —
-        an interop process's 127.0.0.1 IS the Windows loopback."""
+        """Probe the engine's loopback via hostos (interop curl on WSL,
+        a plain request on Linux)."""
         if not self.running:
             return False
-        try:
-            out = subprocess.run(
-                ["/mnt/c/Windows/System32/curl.exe", "-s", "-m",
-                 str(int(timeout)), "-o", "NUL", "-w", "%{http_code}",
-                 f"http://127.0.0.1:{PORT}/v1/models"],
-                capture_output=True, text=True, timeout=timeout + 3)
-            return out.stdout.strip().startswith("2")
-        except Exception:  # noqa: BLE001
-            return False
+        return hostos.http_status(
+            f"http://127.0.0.1:{PORT}/v1/models", timeout).startswith("2")
 
     def status(self) -> dict:
         models_dir = NINFER_DIR / "models"
@@ -226,9 +216,12 @@ class LlmManager:
                 "openai": f"http://{PUBLIC_HOST}:{PORT}/v1",
                 "anthropic": f"http://{PUBLIC_HOST}:{PORT} "
                              "(Messages API)",
-                "note": "Engine binds 127.0.0.1 on the Windows host; "
-                        "off-box access is tailnet-only via tailscale "
-                        "serve.",
+                "note": ("Engine binds 127.0.0.1 on the Windows host; "
+                         "off-box access is tailnet-only via tailscale "
+                         "serve." if hostos.IS_WSL else
+                         "Engine binds 127.0.0.1 on this host; expose "
+                         "off-box via tailscale serve or a reverse "
+                         "proxy."),
             },
         }
 
@@ -252,16 +245,14 @@ class LlmManager:
                 raise RuntimeError(
                     "ninfer is not installed: expected the exe and model at "
                     f"{NINFER_EXE} / {MODEL_FILE}.")
-            win_model = _WIN_MODEL
+            model_path = MODEL_FILE
             if model_file:
                 name = Path(model_file).name  # no path traversal
                 candidate = NINFER_DIR / "models" / name
                 if not candidate.exists():
                     raise RuntimeError(
                         f"No model file named {name} in the models folder.")
-                win_model = (r"F:\Windows Silicon Optimizer\ninfer-3090"
-                             r"\dist\ninfer-rtx3090-windows-x64-0.6.0-"
-                             r"rtx3090\models" + "\\" + name)
+                model_path = candidate
                 # Provisional only — replaced by the engine's own served id
                 # once healthy (deriving from the filename produced
                 # "qwen3.8.27b" vs the served "qwen3.8-27b" and broke
@@ -294,7 +285,7 @@ class LlmManager:
             self._kill_all_instances()  # never allow a second instance
             logfh = open(self._logfile, "ab")  # noqa: SIM115
             self._proc = subprocess.Popen(
-                [str(NINFER_EXE), win_model, *flags],
+                [str(NINFER_EXE), _engine_path_arg(model_path), *flags],
                 stdout=logfh, stderr=subprocess.STDOUT,
                 cwd=str(NINFER_DIR))
             logfh.close()
@@ -336,29 +327,20 @@ class LlmManager:
     def _kill_all_instances() -> None:
         """Kill every ninfer-serve.exe on the Windows side.
 
-        Terminating the WSL interop proxy does NOT kill the Windows
-        process (learned the hard way: an orphan survived a preempt and a
-        restore stacked a second 17 GB instance on the card). taskkill by
-        image name is the only reliable teardown — and single-instance is
-        exactly what we want anyway."""
-        try:
-            subprocess.run(
-                ["/mnt/c/Windows/System32/taskkill.exe", "/IM",
-                 "ninfer-serve.exe", "/F"],
-                capture_output=True, timeout=20)
-        except Exception:  # noqa: BLE001
-            log.exception("taskkill failed")
+        On WSL, terminating the interop proxy does NOT kill the Windows
+        process (learned the hard way: an orphan survived a preempt and
+        a restore stacked a second 17 GB instance on the card) — kill by
+        image name via hostos; single-instance is what we want anyway."""
+        hostos.kill_by_name("ninfer-serve")
 
     def _served_model_id(self) -> str | None:
         """The engine's own answer to /v1/models — the only id remote
         clients can trust."""
         try:
-            out = subprocess.run(
-                ["/mnt/c/Windows/System32/curl.exe", "-s", "-m", "5",
-                 f"http://127.0.0.1:{PORT}/v1/models"],
-                capture_output=True, text=True, timeout=10)
+            body = hostos.http_get(
+                f"http://127.0.0.1:{PORT}/v1/models", 5)
             import json as _json  # noqa: PLC0415
-            data = _json.loads(out.stdout)
+            data = _json.loads(body)
             return data["data"][0]["id"]
         except Exception:  # noqa: BLE001
             return None

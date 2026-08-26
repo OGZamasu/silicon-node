@@ -21,8 +21,10 @@ from .jobs import Job
 
 log = logging.getLogger("silicon-node.store")
 
-HF_HUB = Path(os.environ.get("HF_HUB_CACHE",
-                             "/root/.cache/huggingface/hub"))
+HF_HUB = Path(os.environ.get(
+    "HF_HUB_CACHE",
+    str(Path(os.environ.get("HF_HOME",
+                            Path.home() / ".cache/huggingface")) / "hub")))
 STATE_FILE = Path(os.environ.get(
     "SILICON_NODE_STORE_STATE", "/opt/silicon/store-state.json"))
 # Refuse installs that would leave less than this free (the Mac keeps a
@@ -155,16 +157,28 @@ def _du_bust(entry: dict) -> None:
     _DU_CACHE.pop("+".join(entry["repos"]), None)
 
 
+def _cache_volume() -> str:
+    """The filesystem the model cache lives on (HF_HUB may not exist
+    yet on a fresh box — walk up to something that does)."""
+    p = HF_HUB
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return str(p)
+
+
 def listing() -> dict:
-    guest = shutil.disk_usage("/root")
+    guest = shutil.disk_usage(_cache_volume())
     out = {"disk_free_bytes": guest.free,
            "reserve_bytes": GUEST_RESERVE,
            "models": []}
-    try:
-        # The VHDX grows on the Windows drive; show that budget too.
-        out["disk_free_windows_bytes"] = shutil.disk_usage("/mnt/f").free
-    except OSError:
-        pass
+    from .hostos import IS_WSL  # noqa: PLC0415
+    if IS_WSL:
+        try:
+            # The VHDX grows on the Windows drive; show that budget too.
+            out["disk_free_windows_bytes"] = (
+                shutil.disk_usage("/mnt/f").free)
+        except OSError:
+            pass
     for mid, entry in _catalog().items():
         inst = _installed(entry)
         out["models"].append({
@@ -185,12 +199,15 @@ def listing() -> dict:
 def disk_refusal(entry: dict) -> str | None:
     """Readable refusal when the install would blow the disk budget."""
     need = entry["est_bytes"] - _du(entry)  # resumed installs need less
-    guest_free = shutil.disk_usage("/root").free
+    guest_free = shutil.disk_usage(_cache_volume()).free
     if guest_free - need < GUEST_RESERVE:
         return (f"Not enough space in the node's disk: {entry['name']} "
                 f"needs ~{need / 1e9:.0f} GB and only "
                 f"{max(0, guest_free - GUEST_RESERVE) / 1e9:.0f} GB is "
                 "available above the 10 GB reserve.")
+    from .hostos import IS_WSL  # noqa: PLC0415
+    if not IS_WSL:
+        return None
     try:
         host_free = shutil.disk_usage("/mnt/f").free
     except OSError:

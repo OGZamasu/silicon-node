@@ -20,13 +20,24 @@ from pathlib import Path
 
 log = logging.getLogger("silicon-node.llamacpp")
 
+from . import hostos
+
 PORT = int(os.environ.get("SILICON_NODE_GGUF_PORT", "8082"))
-ENGINE_DIR = Path("/mnt/f/Windows Silicon Optimizer/silicon-node/runtime/"
-                  "llamacpp")
-ENGINE_DIR_WIN = (r"F:\Windows Silicon Optimizer\silicon-node\runtime"
-                  r"\llamacpp")
-GGUF_DIR = Path("/mnt/f/ai-model-cache/gguf")
-GGUF_DIR_WIN = r"F:\ai-model-cache\gguf"
+ENGINE_DIR = Path(os.environ.get(
+    "SILICON_NODE_LLAMACPP_DIR",
+    "/mnt/f/Windows Silicon Optimizer/silicon-node/runtime/llamacpp"
+    if hostos.IS_WSL else "/opt/silicon/llamacpp"))
+GGUF_DIR = Path(os.environ.get(
+    "SILICON_NODE_GGUF_DIR",
+    "/mnt/f/ai-model-cache/gguf"
+    if hostos.IS_WSL else "/opt/silicon/models/gguf"))
+_EXE = "llama-server.exe" if hostos.IS_WSL else "llama-server"
+
+
+def _path_arg(p: Path) -> str:
+    """A path as the ENGINE must see it (F:\... through interop on WSL,
+    the POSIX path itself on Linux)."""
+    return hostos.win_path(p) if hostos.IS_WSL else str(p)
 
 # The Mac's "sharp" Qwen chat template (silicon-optimizer #9): a jinja
 # replacement template handed to llama-server, so answers lead with the
@@ -34,9 +45,11 @@ GGUF_DIR_WIN = r"F:\ai-model-cache\gguf"
 # SharpTemplate.swift; one copy serves every Qwen GGUF.
 SHARP_REPO = "peculiar-ragdoll/Qwen-Sharp-Chat-Templates"
 SHARP_FILE = "chat_template.jinja"
-TEMPLATE_DIR = Path("/mnt/f/ai-model-cache/chat-templates")
+TEMPLATE_DIR = Path(os.environ.get(
+    "SILICON_NODE_TEMPLATE_DIR",
+    "/mnt/f/ai-model-cache/chat-templates"
+    if hostos.IS_WSL else "/opt/silicon/chat-templates"))
 SHARP_TEMPLATE = TEMPLATE_DIR / "qwen-sharp.jinja"
-SHARP_TEMPLATE_WIN = r"F:\ai-model-cache\chat-templates\qwen-sharp.jinja"
 
 
 def sharp_suits(model_name: str) -> bool:
@@ -103,7 +116,7 @@ class LlamaCppManager:
 
     @property
     def engine_installed(self) -> bool:
-        return (ENGINE_DIR / "llama-server.exe").exists()
+        return (ENGINE_DIR / _EXE).exists()
 
     def install_engine_async(self) -> None:
         if self.engine_installed or self.engine_install:
@@ -115,20 +128,36 @@ class LlamaCppManager:
         try:
             rel = _fetch_json("https://api.github.com/repos/ggml-org/"
                               "llama.cpp/releases/latest")
-            asset = next(
-                (a for a in rel.get("assets", [])
-                 if "win" in a["name"].lower()
-                 and "cuda" in a["name"].lower()
-                 and "x64" in a["name"].lower()
-                 and a["name"].endswith(".zip")
-                 and "cudart" not in a["name"].lower()), None)
-            cudart = next(
-                (a for a in rel.get("assets", [])
-                 if "cudart" in a["name"].lower()
-                 and a["name"].endswith(".zip")), None)
+            names = rel.get("assets", [])
+            if hostos.IS_WSL:
+                asset = next(
+                    (a for a in names
+                     if "win" in a["name"].lower()
+                     and "cuda" in a["name"].lower()
+                     and "x64" in a["name"].lower()
+                     and a["name"].endswith(".zip")
+                     and "cudart" not in a["name"].lower()), None)
+                cudart = next(
+                    (a for a in names
+                     if "cudart" in a["name"].lower()
+                     and a["name"].endswith(".zip")), None)
+            else:
+                def _lin(a):
+                    n = a["name"].lower()
+                    return (("ubuntu" in n or "linux" in n)
+                            and "x64" in n and n.endswith(".zip"))
+                # Prefer a CUDA build when the release carries one; the
+                # plain ubuntu build still serves (CPU-only) rather than
+                # failing the install outright.
+                asset = (next((a for a in names
+                               if _lin(a) and "cuda" in a["name"].lower()),
+                              None)
+                         or next((a for a in names if _lin(a)), None))
+                cudart = None
             if not asset:
                 raise RuntimeError(
-                    "No win-cuda build in the latest llama.cpp release.")
+                    "No usable build for this OS in the latest llama.cpp "
+                    "release.")
             ENGINE_DIR.mkdir(parents=True, exist_ok=True)
             for i, a in enumerate([asset] + ([cudart] if cudart else [])):
                 self.engine_install = {
@@ -145,13 +174,18 @@ class LlamaCppManager:
             if not self.engine_installed:
                 for sub in ("build/bin", "bin"):
                     cand = ENGINE_DIR / sub
-                    if (cand / "llama-server.exe").exists():
+                    if (cand / _EXE).exists():
                         for f in cand.iterdir():
                             f.rename(ENGINE_DIR / f.name)
                         break
             if not self.engine_installed:
-                raise RuntimeError("llama-server.exe not found after "
-                                   "extraction.")
+                raise RuntimeError(f"{_EXE} not found after extraction.")
+            if not hostos.IS_WSL:
+                # zipfile drops the exec bit.
+                for f in ENGINE_DIR.iterdir():
+                    if f.is_file() and (f.name.startswith("llama")
+                                        or f.suffix == ".so"):
+                        f.chmod(f.stat().st_mode | 0o755)
             self.engine_install = None
             log.info("llama.cpp engine installed (%s)", rel.get("tag_name"))
         except Exception as exc:  # noqa: BLE001
@@ -164,15 +198,8 @@ class LlamaCppManager:
         now = time.time()
         if max_age and self._probe and now - self._probe[0] < max_age:
             return self._probe[1]
-        try:
-            out = subprocess.run(
-                ["/mnt/c/Windows/System32/curl.exe", "-s", "-m",
-                 str(int(timeout)), "-o", "NUL", "-w", "%{http_code}",
-                 f"http://127.0.0.1:{PORT}/health"],
-                capture_output=True, text=True, timeout=timeout + 4)
-            ok = out.stdout.strip().startswith("2")
-        except Exception:  # noqa: BLE001
-            ok = False
+        ok = hostos.http_status(
+            f"http://127.0.0.1:{PORT}/health", timeout).startswith("2")
         self._probe = (now, ok)
         return ok
 
@@ -240,8 +267,8 @@ class LlamaCppManager:
             self.context = int(context)
             self._kill_instances()
             self._probe = None
-            args = [str(ENGINE_DIR / "llama-server.exe"),
-                    "-m", GGUF_DIR_WIN + "\\" + name,
+            args = [str(ENGINE_DIR / _EXE),
+                    "-m", _path_arg(GGUF_DIR / name),
                     "--host", "127.0.0.1", "--port", str(PORT),
                     "-ngl", "999", "-c", str(context), "--no-webui",
                     # Mirror the Mac's LlamaArguments: --jinja is what
@@ -251,14 +278,21 @@ class LlamaCppManager:
             if (sharp_suits(name) and SHARP_TEMPLATE.exists()
                     and os.environ.get("SILICON_NODE_SHARP_TEMPLATE",
                                        "1") != "0"):
-                # Windows path — the exe cannot open /mnt/f (interop
-                # passes argv verbatim).
-                args += ["--chat-template-file", SHARP_TEMPLATE_WIN]
+                # As the engine sees it: F:\... through interop on
+                # WSL (the exe cannot open /mnt/f), POSIX on Linux.
+                args += ["--chat-template-file",
+                         _path_arg(SHARP_TEMPLATE)]
                 self.sharp_active = True
+            env = dict(os.environ)
+            if not hostos.IS_WSL:
+                # The official Linux builds ship their .so files beside
+                # the binary; make sure the loader finds them.
+                env["LD_LIBRARY_PATH"] = (str(ENGINE_DIR) + ":"
+                                          + env.get("LD_LIBRARY_PATH", ""))
             logfh = open(self._logfile, "ab")  # noqa: SIM115
             self._proc = subprocess.Popen(
                 args, stdout=logfh, stderr=subprocess.STDOUT,
-                cwd=str(ENGINE_DIR))
+                cwd=str(ENGINE_DIR), env=env)
             logfh.close()
             self.model_file = name
             self._started_at = time.time()
@@ -294,16 +328,7 @@ class LlamaCppManager:
 
     @staticmethod
     def _kill_instances() -> None:
-        script = ("Get-CimInstance Win32_Process -Filter "
-                  "\"Name='llama-server.exe'\" | ForEach-Object "
-                  "{ Stop-Process -Id $_.ProcessId -Force }")
-        try:
-            subprocess.run(
-                ["/mnt/c/Windows/System32/WindowsPowerShell/v1.0/"
-                 "powershell.exe", "-NoProfile", "-Command", script],
-                capture_output=True, timeout=30)
-        except Exception:  # noqa: BLE001
-            log.exception("llama-server kill failed")
+        hostos.kill_by_name("llama-server")
 
 
 class GGUFDownloads:
