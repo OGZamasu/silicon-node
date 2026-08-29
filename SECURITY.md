@@ -3,7 +3,10 @@
 ## The one rule
 
 **If the server can be reached from outside this PC, the swarm token must
-be set.** No token means localhost only. That's the whole rule.
+be set.** No token means localhost only. That's the whole rule — and the
+server now enforces it rather than trusting you to: with no node token
+and no swarm token it binds `127.0.0.1` whatever `SILICON_NODE_HOST`
+asks for, and logs why.
 
 Why: this node renders whatever it's asked to and serves a chat model.
 Without a token, anyone on your network could use your GPU. The Mac app
@@ -20,13 +23,28 @@ enforces the same rule on its side.
   re-pairs. The Mac handles this automatically.
 - A **wrong token is always rejected**, even before you turn on strict
   enforcement — so a typo shows up immediately, not in an incident.
+- **Every request from another machine carries a token.** Requests
+  arriving on loopback are the owner's own dashboard and tray GUI and
+  stay open; anything off-box without a bearer header gets a 401.
+- **Members are not operators.** A paired client token submits jobs and
+  chats. Changing abilities, uninstalling models, starting downloads,
+  pausing serving, stopping engines and revealing folders on the host
+  desktop all need the node token or the swarm token.
+- Tokens are compared in **constant time**, so a wrong guess reveals
+  nothing about how nearly right it was.
 - Token management endpoints demand the admin token **always**, no
   exceptions.
 - `/health` stays open so other machines can see the node is alive. It
   says nothing except name, version, uptime, and queue length.
 
-Turn on strict mode (every request must carry a token) with
-`SILICON_NODE_REQUIRE_AUTH=1` once all your machines are paired.
+Turn on strict mode (loopback callers must carry a token too, which
+means the local dashboard needs one) with `SILICON_NODE_REQUIRE_AUTH=1`.
+
+## Checking it
+
+The access rules are tests, not prose: `pytest` (after `pip install -r
+requirements-dev.txt`) runs the whole role matrix in
+`tests/test_auth.py` on any machine, GPU or not.
 
 ## Where secrets live
 

@@ -1,0 +1,3 @@
+# Test-only dependencies: the suite runs on any machine, GPU or not.
+-r requirements-core.txt
+pytest>=8.0
