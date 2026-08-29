@@ -26,7 +26,7 @@ from pathlib import Path
 
 log = logging.getLogger("silicon-node.llm")
 
-from . import hostos
+from . import hostos  # noqa: E402 (after the logger it configures)
 
 NINFER_DIR = Path(os.environ.get(
     "NINFER_DIR",
@@ -45,7 +45,7 @@ PUBLIC_HOST = os.environ.get("SILICON_NODE_PUBLIC_HOST", "127.0.0.1")
 AUTOSTART = os.environ.get("SILICON_NODE_LLM_AUTOSTART", "1") != "0"
 
 def _engine_path_arg(p: Path) -> str:
-    """A path as the ENGINE must see it: on WSL the exe is a Windows
+    r"""A path as the ENGINE must see it: on WSL the exe is a Windows
     process and interop passes argv verbatim, so translate to F:\...;
     on Linux the POSIX path is already the truth."""
     return hostos.win_path(p) if hostos.IS_WSL else str(p)

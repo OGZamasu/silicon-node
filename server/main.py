@@ -496,7 +496,7 @@ def capability_list() -> list[dict]:
                        "present yet."),
         },
     ]
-    from .capsettings import CAPS, DEFAULTS  # noqa: PLC0415
+    from .capsettings import CAPS  # noqa: PLC0415
     for c in caps:
         cid = c["id"]
         if cid in _CAP_DESCRIPTIONS:
@@ -1073,7 +1073,6 @@ async def chat_completions_proxy(request: Request):
     which WSL sockets cannot reach — interop curl bridges it, streaming
     included. Clients that should be counted point at :8790/v1 instead
     of the engine port; the engine ports keep working unchanged."""
-    import os  # noqa: PLC0415
     import uuid  # noqa: PLC0415
     from .llamacpp import LLAMACPP, PORT as GGUF_PORT  # noqa: PLC0415
     if LLM.running:
