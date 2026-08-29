@@ -150,6 +150,35 @@ class TestPruneEndpoint:
         assert response.status_code == 200
         assert job.job_id in response.json()["removed"]
 
+    def test_pruning_runs_off_the_event_loop(
+            self, client, tokens, monkeypatch):
+        import asyncio
+        import threading
+
+        loop_threads = []
+        prune_threads = []
+        result = {"removed": [], "freed_bytes": 0, "kept": 0}
+        original_to_thread = asyncio.to_thread
+
+        def fake_prune(*, keep, max_age_days):
+            prune_threads.append(threading.get_ident())
+            return result
+
+        async def capture_loop_thread(func, *args, **kwargs):
+            loop_threads.append(threading.get_ident())
+            return await original_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr(STORE, "prune", fake_prune)
+        monkeypatch.setattr(asyncio, "to_thread", capture_loop_thread)
+        response = client.post(
+            "/v1/jobs/prune", json={"keep": 0, "max_age_days": 14},
+            headers={"Authorization": f"Bearer {tokens['node']}"})
+
+        assert response.status_code == 200
+        assert response.json() == result
+        assert prune_threads
+        assert prune_threads[0] != loop_threads[0]
+
     def test_nonsense_limits_are_refused_with_a_reason(self, client, tokens):
         response = client.post(
             "/v1/jobs/prune", json={"keep": "lots"},
