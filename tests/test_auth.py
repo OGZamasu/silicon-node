@@ -174,9 +174,9 @@ def test_reserved_client_names_cannot_claim_roles(tokens):
         assert CLIENTS.name_of(token) == "nodey"
     finally:
         CLIENTS.revoke(name)
-    for name in ("node", " Admin ", "MEMBER", "swarm"):
+    for reserved_name in ("node", " Admin ", "MEMBER", "swarm"):
         with pytest.raises(ValueError, match="reserved"):
-            CLIENTS.mint(name)
+            CLIENTS.mint(reserved_name)
 
 
 def test_a_client_named_node_is_still_only_a_member(tokens, scratch):
@@ -185,15 +185,29 @@ def test_a_client_named_node_is_still_only_a_member(tokens, scratch):
     from server.clients import CLIENTS, CLIENTS_FILE
 
     rogue_token = "legacy-node-token"
-    CLIENTS_FILE.write_text(json.dumps([{
-        "name": "node", "token": rogue_token,
-        "created": "2025-01-01 00:00:00", "last_seen": None,
-        "jobs_total": 0, "jobs_by_kind": {}, "llm_requests": 0,
-    }]))
-    CLIENTS._load()
-    r = call(client(REMOTE), "post", "/v1/queue/cancel",
-             {"scope": "pending"}, rogue_token)
-    assert r.status_code == 403
+    previous_file = (CLIENTS_FILE.read_bytes()
+                     if CLIENTS_FILE.exists() else None)
+    previous_rows = list(CLIENTS._clients)
+    previous_last_persist = CLIENTS._last_persist
+    try:
+        CLIENTS_FILE.write_text(json.dumps([{
+            "name": "node", "token": rogue_token,
+            "created": "2025-01-01 00:00:00", "last_seen": None,
+            "jobs_total": 0, "jobs_by_kind": {}, "llm_requests": 0,
+        }]))
+        CLIENTS._load()
+        r = call(client(REMOTE), "post", "/v1/queue/cancel",
+                 {"scope": "pending"}, rogue_token)
+        assert r.status_code == 403
+    finally:
+        if previous_file is None:
+            CLIENTS_FILE.unlink(missing_ok=True)
+        else:
+            CLIENTS_FILE.write_bytes(previous_file)
+        CLIENTS._load()
+        CLIENTS._clients = previous_rows
+        CLIENTS._tokens = {row["token"]: row for row in previous_rows}
+        CLIENTS._last_persist = previous_last_persist
 
 
 def test_harness_mutation_is_operator_only(tokens, monkeypatch):
