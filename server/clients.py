@@ -54,6 +54,10 @@ class ClientStore:
         name = name.strip()
         if not name or len(name) > 80:
             raise ValueError("A client needs a short, non-empty name.")
+        if name.casefold() in {"node", "admin", "member", "swarm"}:
+            raise ValueError(
+                "That name is reserved for the node's own roles — pick "
+                "another.")
         with self._lock:
             if any(c["name"] == name for c in self._clients):
                 raise KeyError(name)

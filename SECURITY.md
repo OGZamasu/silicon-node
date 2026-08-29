@@ -24,8 +24,10 @@ enforces the same rule on its side.
 - A **wrong token is always rejected**, even before you turn on strict
   enforcement — so a typo shows up immediately, not in an incident.
 - **Every request from another machine carries a token.** Requests
-  arriving on loopback are the owner's own dashboard and tray GUI and
-  stay open; anything off-box without a bearer header gets a 401.
+  arriving directly on loopback are the owner's own dashboard and tray
+  GUI and stay open; a request carrying any forwarding header is treated
+  as remote even when its source address is loopback, and needs a bearer
+  token.
 - **Members are not operators.** A paired client token submits jobs and
   chats. Changing abilities, uninstalling models, starting downloads,
   pausing serving, stopping engines and revealing folders on the host

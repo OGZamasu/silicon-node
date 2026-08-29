@@ -36,6 +36,12 @@ HOST = os.environ.get("SILICON_NODE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("SILICON_NODE_PORT", "8790"))
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
+# Headers that mean "someone forwarded this": a proxy on this machine
+# hands us its own loopback address as the source, so the address alone
+# cannot say the sender is the owner at the console.
+FORWARDED_HEADERS = ("x-forwarded-for", "x-forwarded-host",
+                     "x-real-ip", "forwarded")
+
 # Auth: a token is required for every off-box /v1/* request. Requests
 # arriving on the loopback interface are the owner's own dashboard and
 # tooling, and stay open. /health stays open everywhere — it is a
@@ -68,6 +74,10 @@ VALID_TOKENS = {t for t in (TOKEN, SWARM_TOKEN) if t}
 
 def is_loopback(ip: str | None) -> bool:
     return bool(ip) and ip in LOOPBACK_HOSTS
+
+
+def is_forwarded(headers) -> bool:
+    return any(str(headers.get(h, "")).strip() for h in FORWARDED_HEADERS)
 
 
 def same_token(supplied: str, secret: str) -> bool:

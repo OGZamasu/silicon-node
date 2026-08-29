@@ -39,6 +39,13 @@ app = FastAPI(title=config.SERVER_NAME, version=config.SERVER_VERSION)
 STARTED_AT = time.time()
 
 
+def _is_owner_local(request: Request) -> bool:
+    """The owner at this machine's console: a loopback source that no
+    proxy has relayed."""
+    return (config.is_loopback(request.client.host if request.client else None)
+            and not config.is_forwarded(request.headers))
+
+
 # ---------------------------------------------------------------------------
 # Auth: every off-box /v1/ request carries a bearer token — the node token,
 # the swarm token, or a paired client's own. Loopback callers (the node's
@@ -60,8 +67,7 @@ async def bearer_auth(request: Request, call_next):
                 "That bearer token does not match this node's node token, "
                 "the swarm token, or any paired client.", status_code=401)
         if not supplied:
-            local = config.is_loopback(
-                request.client.host if request.client else None)
+            local = _is_owner_local(request)
             if config.REQUIRE_AUTH or not local:
                 return PlainTextResponse(
                     "This Silicon node requires a bearer token. Send "
@@ -161,7 +167,7 @@ def _actor(request: Request):
     """
     tok = _bearer_of(request)
     if not tok:
-        if config.is_loopback(request.client.host if request.client else None):
+        if _is_owner_local(request):
             return "node"
         return "member"
     if config.is_swarm_token(tok):
@@ -170,6 +176,19 @@ def _actor(request: Request):
         return "node"
     from .clients import CLIENTS  # noqa: PLC0415
     return CLIENTS.name_of(tok) or "member"
+
+
+def _role(request: Request) -> str:
+    """admin | node | member — from the credential alone. A paired
+    client's *name* never grants rights, however it was spelled."""
+    tok = _bearer_of(request)
+    if not tok:
+        return "node" if _is_owner_local(request) else "member"
+    if config.is_swarm_token(tok):
+        return "admin"
+    if config.is_node_token(tok):
+        return "node"
+    return "member"
 
 
 def _submitter(request: Request, cap: Optional[str] = None) -> dict:
@@ -285,7 +304,7 @@ async def queue_cancel(request: Request):
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
-    if _actor(request) not in ("admin", "node"):
+    if _role(request) not in ("admin", "node"):
         raise HTTPException(
             status_code=403,
             detail="Clearing the whole queue is for the swarm admin or "
@@ -1036,7 +1055,7 @@ async def retopologize_upload(
 def _require_operator(request: Request, what: str) -> None:
     """Engine control is for the swarm admin or the node owner —
     members chat with the model, they don't restart it (handoff 132)."""
-    if _actor(request) not in ("admin", "node"):
+    if _role(request) not in ("admin", "node"):
         raise HTTPException(
             status_code=403,
             detail=f"{what} is for the swarm admin or the node owner.")
@@ -1066,14 +1085,14 @@ async def chat_completions_proxy(request: Request):
             status_code=503,
             detail="No chat engine is running — start one via "
                    "/v1/llm/start or /v1/gguf/start.")
-    actor = _actor(request)
-    if actor not in ("admin", "node"):
+    role = _role(request)
+    if role not in ("admin", "node"):
         from .serving import SERVING  # noqa: PLC0415
         if SERVING.paused:
             raise HTTPException(status_code=503,
                                 detail=SERVING.refusal())
         from .clients import CLIENTS  # noqa: PLC0415
-        CLIENTS.count_llm(actor)
+        CLIENTS.count_llm(_actor(request))
     body = await request.body()
     stream = b'"stream": true' in body or b'"stream":true' in body
     from .hostos import bridge_curl_argv, chat_spool_dir  # noqa: PLC0415
@@ -1187,7 +1206,8 @@ def harness_status():
 
 
 @app.post("/v1/harness/start")
-def harness_start():
+def harness_start(request: Request):
+    _require_operator(request, "Starting the agent harness")
     from .harness import HARNESS
     try:
         HARNESS.start()
@@ -1197,7 +1217,8 @@ def harness_start():
 
 
 @app.post("/v1/harness/stop")
-def harness_stop():
+def harness_stop(request: Request):
+    _require_operator(request, "Stopping the agent harness")
     from .harness import HARNESS
     HARNESS.stop()
     return HARNESS.status()
@@ -1675,7 +1696,7 @@ def _require_job_owner(request: Request, job_id: str) -> None:
     """Members touch only their own jobs; the swarm admin and the node
     owner touch anything (handoff 132)."""
     actor = _actor(request)
-    if actor in ("admin", "node"):
+    if _role(request) in ("admin", "node"):
         return
     job = STORE.get(job_id)
     owner = (job.submitted_by or {}).get("client") if job else None
