@@ -21,14 +21,14 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QLockFile, QObject, QSize, Qt, QThread, \
+from PySide6.QtCore import QDir, QLockFile, QObject, Qt, QThread, \
     QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QSystemTrayIcon,
+    QScrollArea, QSpinBox, QStackedWidget, QSystemTrayIcon,
     QVBoxLayout, QWidget,
 )
 
@@ -585,7 +585,6 @@ class ModelsPage(QWidget):
 
     def _fit_text(self, serve_gb: float, headroom_gb) -> tuple[str, str]:
         # Warn-don't-refuse: state the number and what to expect.
-        total_free = 24.0  # with LLM stopped the card frees up
         if serve_gb <= 21.0:
             return (f"fits — needs ~{serve_gb} GB of 24 GB", "good")
         return (f"tight — needs ~{serve_gb} GB; alongside the desktop "
