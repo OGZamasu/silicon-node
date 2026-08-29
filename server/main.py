@@ -25,7 +25,7 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from . import config, pipeline
+from . import config, pipeline, uploads
 from .jobs import STORE
 from .llm import DOWNLOADS, LLM, MODEL_ID as LLM_MODEL_ID, PORT as LLM_PORT
 
@@ -72,6 +72,13 @@ async def bearer_auth(request: Request, call_next):
                 return PlainTextResponse(
                     "This Silicon node requires a bearer token. Send "
                     "'Authorization: Bearer <token>'.", status_code=401)
+        # Body size is checked here rather than in each handler so no
+        # submit route can be added without one.
+        try:
+            uploads.check_declared_size(
+                request.headers.get("content-length"))
+        except HTTPException as exc:
+            return PlainTextResponse(str(exc.detail), status_code=413)
     return await call_next(request)
 
 
@@ -240,8 +247,7 @@ async def image_to_mesh(
     job.dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(image.filename or "input.png").suffix or ".png"
     image_path = job.dir / f"input{suffix}"
-    with image_path.open("wb") as f:
-        shutil.copyfileobj(image.file, f)
+    await uploads.save_upload(image, image_path)
     if image_path.stat().st_size == 0:
         raise HTTPException(
             status_code=400,
@@ -314,6 +320,33 @@ async def queue_cancel(request: Request):
         raise HTTPException(status_code=400,
                             detail='scope must be "pending" or "all".')
     return {"cancelled": STORE.cancel_queue(scope)}
+
+
+@app.post("/v1/jobs/prune")
+async def jobs_prune(request: Request):
+    """Reclaim disk now, rather than waiting for the next finished job.
+
+    Retention runs on its own (at startup and after every job), so this is
+    for the case where the disk is full *today*: the dashboard's Free space
+    button, and `keep`/`max_age_days` for a one-off deeper sweep.
+    """
+    _require_operator(request, "Deleting finished jobs and their artifacts")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    keep = body.get("keep")
+    days = body.get("max_age_days")
+    try:
+        keep_n = None if keep is None else max(0, int(keep))
+        max_age = None if days is None else max(0.0, float(days))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="keep must be a whole number of jobs and max_age_days "
+                   "a number of days.") from None
+    return await asyncio.to_thread(STORE.prune, keep=keep_n,
+                                   max_age_days=max_age)
 
 
 @app.post("/v1/jobs/{job_id}/{action}")
@@ -1041,8 +1074,7 @@ async def retopologize_upload(
     job.submitted_by = _submitter(request, "retopologize")
     job.dir.mkdir(parents=True, exist_ok=True)
     mesh_path = job.dir / f"input{suffix}"
-    with mesh_path.open("wb") as f:
-        shutil.copyfileobj(mesh.file, f)
+    await uploads.save_upload(mesh, mesh_path)
     job.params["mesh_path"] = str(mesh_path)
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -1279,7 +1311,7 @@ async def text_to_video_submit(request: Request):
                                 detail="image_b64 is not valid base64."
                                 ) from None
         suffix = Path(body.get("image_name", "start.png")).suffix or ".png"
-        (job.dir / f"start{suffix}").write_bytes(img)
+        await uploads.write_bytes(job.dir / f"start{suffix}", img)
         job.params["image_path"] = str(job.dir / f"start{suffix}")
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -1428,8 +1460,8 @@ async def portrait_animate_submit(request: Request):
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     drv_suffix = Path(body.get("driving_name", "d.mp4")).suffix or ".mp4"
-    (job.dir / f"portrait{img_suffix}").write_bytes(image)
-    (job.dir / f"driving{drv_suffix}").write_bytes(driving)
+    await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
+    await uploads.write_bytes(job.dir / f"driving{drv_suffix}", driving)
     job.params["image_path"] = str(job.dir / f"portrait{img_suffix}")
     job.params["driving_path"] = str(job.dir / f"driving{drv_suffix}")
     STORE.enqueue(job)
@@ -1462,8 +1494,8 @@ async def talking_head_submit(request: Request):
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     aud_suffix = Path(body.get("audio_name", "a.wav")).suffix or ".wav"
-    (job.dir / f"portrait{img_suffix}").write_bytes(image)
-    (job.dir / f"speech{aud_suffix}").write_bytes(audio)
+    await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
+    await uploads.write_bytes(job.dir / f"speech{aud_suffix}", audio)
     job.params["image_path"] = str(job.dir / f"portrait{img_suffix}")
     job.params["audio_path"] = str(job.dir / f"speech{aud_suffix}")
     STORE.enqueue(job)
