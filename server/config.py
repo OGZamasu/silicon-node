@@ -126,6 +126,21 @@ VERT_NUM_DEFAULT = 2000
 # run-server.sh restarts the whole process rather than recovering in-process.
 OOM_EXIT_CODE = 3
 
+# Retention. Every job keeps its inputs and its artifacts forever unless
+# something removes them, and a node that renders 720p clips fills a disk
+# in weeks — at which point every capability fails at once, on a machine
+# nobody is sitting at. Finished jobs are pruned oldest-first; the newest
+# RETAIN_JOBS are always kept, whatever their age. 0 disables either rule.
+RETAIN_JOBS = int(os.environ.get("SILICON_NODE_RETAIN_JOBS", "200"))
+RETAIN_DAYS = float(os.environ.get("SILICON_NODE_RETAIN_DAYS", "14"))
+
+# Largest request body accepted, per upload and in total. A stray
+# multipart post should be refused at the door rather than after it has
+# written 40 GB into the job directory. Base64 JSON bodies are read whole
+# into memory, so they are held to the same figure.
+MAX_UPLOAD_BYTES = int(os.environ.get("SILICON_NODE_MAX_UPLOAD_MB", "2048")) \
+    * 1024 * 1024
+
 
 def ensure_dirs() -> None:
     for d in (DATA_DIR, JOBS_DIR, FILES_DIR, LOG_DIR):

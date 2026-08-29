@@ -42,6 +42,21 @@ enforces the same rule on its side.
 Turn on strict mode (loopback callers must carry a token too, which
 means the local dashboard needs one) with `SILICON_NODE_REQUIRE_AUTH=1`.
 
+## Limits on what a caller can spend
+
+A member with a valid token can still cost the node its disk, so two
+budgets are enforced rather than documented:
+
+| Setting | Default | What it means |
+|---|---|---|
+| `SILICON_NODE_MAX_UPLOAD_MB` | 2048 | Bodies above this are refused with 413 — on the declared `Content-Length` first, then while streaming, so nothing oversized lands on disk |
+| `SILICON_NODE_RETAIN_JOBS` | 200 | Finished jobs kept regardless of age |
+| `SILICON_NODE_RETAIN_DAYS` | 14 | Finished jobs older than this are deleted with their inputs and artifacts, once the newest `RETAIN_JOBS` are safe |
+
+Retention runs at startup and after every finished job; `POST
+/v1/jobs/prune` (operator only) reclaims space immediately. Queued,
+running and held jobs are never pruned.
+
 ## Checking it
 
 The access rules are tests, not prose: `pytest` (after `pip install -r
