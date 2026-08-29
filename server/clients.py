@@ -16,6 +16,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import config
+
 log = logging.getLogger("silicon-node.clients")
 
 CLIENTS_FILE = Path(os.environ.get("SILICON_NODE_CLIENTS_FILE",
@@ -52,6 +54,10 @@ class ClientStore:
         name = name.strip()
         if not name or len(name) > 80:
             raise ValueError("A client needs a short, non-empty name.")
+        if name.casefold() in {"node", "admin", "member", "swarm"}:
+            raise ValueError(
+                "That name is reserved for the node's own roles — pick "
+                "another.")
         with self._lock:
             if any(c["name"] == name for c in self._clients):
                 raise KeyError(name)
@@ -109,10 +115,21 @@ class ClientStore:
                      "llm_requests": c.get("llm_requests", 0)}
                     for c in self._clients]
 
+    def _match(self, token: str) -> dict | None:
+        """The client a token belongs to, compared in constant time so a
+        wrong guess reveals nothing about how wrong it was. Callers hold
+        the lock."""
+        for candidate, c in self._tokens.items():
+            if config.same_token(token, candidate):
+                return c
+        return None
+
     def name_of(self, token: str) -> str | None:
         """The paired client's name for a live token, else None."""
+        if not token:
+            return None
         with self._lock:
-            c = self._tokens.get(token)
+            c = self._match(token)
             return c["name"] if c else None
 
     def accepts(self, token: str) -> bool:
@@ -122,7 +139,7 @@ class ClientStore:
         if not token:
             return False
         with self._lock:
-            c = self._tokens.get(token)
+            c = self._match(token)
             if c is None:
                 return False
             c["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")

@@ -39,28 +39,39 @@ app = FastAPI(title=config.SERVER_NAME, version=config.SERVER_VERSION)
 STARTED_AT = time.time()
 
 
+def _is_owner_local(request: Request) -> bool:
+    """The owner at this machine's console: a loopback source that no
+    proxy has relayed."""
+    return (config.is_loopback(request.client.host if request.client else None)
+            and not config.is_forwarded(request.headers))
+
+
 # ---------------------------------------------------------------------------
-# Auth: optional bearer token. Unset -> open (LAN-only milestone). Set ->
-# required on everything under /v1/. /health stays open as a probe.
+# Auth: every off-box /v1/ request carries a bearer token — the node token,
+# the swarm token, or a paired client's own. Loopback callers (the node's
+# dashboard and tray GUI, which send no header) stay open unless strict
+# mode is on. /health stays open everywhere as a probe.
 # ---------------------------------------------------------------------------
 
 @app.middleware("http")
 async def bearer_auth(request: Request, call_next):
-    if request.url.path.startswith("/v1/") and config.VALID_TOKENS:
+    if request.url.path.startswith("/v1/"):
         header = request.headers.get("authorization", "")
         supplied = header.removeprefix("Bearer ").strip() if header else ""
         from .clients import CLIENTS  # noqa: PLC0415
-        if supplied and supplied not in config.VALID_TOKENS \
+        if supplied and not config.token_valid(supplied) \
                 and not CLIENTS.accepts(supplied):
-            # A wrong token is always rejected — catches misconfiguration
-            # (and revoked members) early even while enforcement is off.
+            # A wrong token is always rejected, whatever the interface —
+            # it catches misconfiguration (and revoked members) early.
             return PlainTextResponse(
                 "That bearer token does not match this node's node token, "
                 "the swarm token, or any paired client.", status_code=401)
-        if not supplied and config.REQUIRE_AUTH:
-            return PlainTextResponse(
-                "This Silicon node requires a bearer token. Send "
-                "'Authorization: Bearer <token>'.", status_code=401)
+        if not supplied:
+            local = _is_owner_local(request)
+            if config.REQUIRE_AUTH or not local:
+                return PlainTextResponse(
+                    "This Silicon node requires a bearer token. Send "
+                    "'Authorization: Bearer <token>'.", status_code=401)
     return await call_next(request)
 
 
@@ -78,7 +89,7 @@ def _require_swarm_admin(request: Request) -> None:
         raise HTTPException(
             status_code=503,
             detail="This node has no swarm token configured yet.")
-    if supplied == config.SWARM_TOKEN:
+    if config.is_swarm_token(supplied):
         return
     from .clients import CLIENTS  # noqa: PLC0415
     if supplied and CLIENTS.accepts(supplied):
@@ -146,18 +157,38 @@ def _bearer_of(request: Request) -> str:
 
 
 def _actor(request: Request):
-    """Who is acting: "admin" (swarm token), "node" (node token or
-    unauthenticated local use while enforcement is off), or a paired
-    client's name."""
+    """Who is acting: "admin" (swarm token), "node" (node token, or an
+    untokened loopback caller — the owner's own dashboard), or a paired
+    client's name.
+
+    An unrecognised token is never the owner: the middleware rejects it
+    outright, and if it somehow arrives here it gets a member's rights,
+    not an operator's.
+    """
     tok = _bearer_of(request)
     if not tok:
-        return "node"   # the local dashboard, pre-enforcement
-    if config.SWARM_TOKEN and tok == config.SWARM_TOKEN:
+        if _is_owner_local(request):
+            return "node"
+        return "member"
+    if config.is_swarm_token(tok):
         return "admin"
-    if config.TOKEN and tok == config.TOKEN:
+    if config.is_node_token(tok):
         return "node"
     from .clients import CLIENTS  # noqa: PLC0415
-    return CLIENTS.name_of(tok) or "node"
+    return CLIENTS.name_of(tok) or "member"
+
+
+def _role(request: Request) -> str:
+    """admin | node | member — from the credential alone. A paired
+    client's *name* never grants rights, however it was spelled."""
+    tok = _bearer_of(request)
+    if not tok:
+        return "node" if _is_owner_local(request) else "member"
+    if config.is_swarm_token(tok):
+        return "admin"
+    if config.is_node_token(tok):
+        return "node"
+    return "member"
 
 
 def _submitter(request: Request, cap: Optional[str] = None) -> dict:
@@ -170,9 +201,9 @@ def _submitter(request: Request, cap: Optional[str] = None) -> dict:
     tok = _bearer_of(request)
     who = None
     if tok:
-        if config.SWARM_TOKEN and tok == config.SWARM_TOKEN:
+        if config.is_swarm_token(tok):
             who = "swarm (shared token)"
-        elif config.TOKEN and tok == config.TOKEN:
+        elif config.is_node_token(tok):
             who = "this node's token"
         else:
             from .clients import CLIENTS  # noqa: PLC0415
@@ -273,7 +304,7 @@ async def queue_cancel(request: Request):
         body = await request.json()
     except Exception:  # noqa: BLE001
         body = {}
-    if _actor(request) not in ("admin", "node"):
+    if _role(request) not in ("admin", "node"):
         raise HTTPException(
             status_code=403,
             detail="Clearing the whole queue is for the swarm admin or "
@@ -628,6 +659,7 @@ async def capability_update(cap_id: str, request: Request):
     """Enable/disable an ability or change its exposed settings
     (handoff 129). Partial updates; unknown setting keys are reported
     back as ignored rather than written."""
+    _require_operator(request, "Changing an ability")
     from .capsettings import CAPS, DEFAULTS  # noqa: PLC0415
     if cap_id not in DEFAULTS:
         raise HTTPException(
@@ -786,8 +818,9 @@ def _model_admin() -> dict:
 
 
 @app.post("/v1/models/{model_id}/reveal")
-def model_reveal(model_id: str):
+def model_reveal(model_id: str, request: Request):
     """Open the model's folder in Windows Explorer."""
+    _require_operator(request, "Opening a model folder on the host desktop")
     adm = _model_admin().get(model_id)
     if adm is None or adm["loc"] is None:
         raise HTTPException(status_code=404,
@@ -804,9 +837,10 @@ def model_reveal(model_id: str):
 
 
 @app.delete("/v1/models/{model_id}")
-def model_delete(model_id: str):
+def model_delete(model_id: str, request: Request):
     """Uninstall a model's weights from disk. Refused while the model
     is loaded, and for the one checkpoint with no reinstall path."""
+    _require_operator(request, "Uninstalling a model")
     adm = _model_admin().get(model_id)
     if adm is None:
         raise HTTPException(status_code=404,
@@ -1021,7 +1055,7 @@ async def retopologize_upload(
 def _require_operator(request: Request, what: str) -> None:
     """Engine control is for the swarm admin or the node owner —
     members chat with the model, they don't restart it (handoff 132)."""
-    if _actor(request) not in ("admin", "node"):
+    if _role(request) not in ("admin", "node"):
         raise HTTPException(
             status_code=403,
             detail=f"{what} is for the swarm admin or the node owner.")
@@ -1051,14 +1085,14 @@ async def chat_completions_proxy(request: Request):
             status_code=503,
             detail="No chat engine is running — start one via "
                    "/v1/llm/start or /v1/gguf/start.")
-    actor = _actor(request)
-    if actor not in ("admin", "node"):
+    role = _role(request)
+    if role not in ("admin", "node"):
         from .serving import SERVING  # noqa: PLC0415
         if SERVING.paused:
             raise HTTPException(status_code=503,
                                 detail=SERVING.refusal())
         from .clients import CLIENTS  # noqa: PLC0415
-        CLIENTS.count_llm(actor)
+        CLIENTS.count_llm(_actor(request))
     body = await request.body()
     stream = b'"stream": true' in body or b'"stream":true' in body
     from .hostos import bridge_curl_argv, chat_spool_dir  # noqa: PLC0415
@@ -1172,7 +1206,8 @@ def harness_status():
 
 
 @app.post("/v1/harness/start")
-def harness_start():
+def harness_start(request: Request):
+    _require_operator(request, "Starting the agent harness")
     from .harness import HARNESS
     try:
         HARNESS.start()
@@ -1182,7 +1217,8 @@ def harness_start():
 
 
 @app.post("/v1/harness/stop")
-def harness_stop():
+def harness_stop(request: Request):
+    _require_operator(request, "Stopping the agent harness")
     from .harness import HARNESS
     HARNESS.stop()
     return HARNESS.status()
@@ -1477,6 +1513,7 @@ def gguf_status():
 
 @app.post("/v1/gguf/download")
 async def gguf_download(request: Request):
+    _require_operator(request, "Downloading a GGUF model")
     from .llamacpp import GGUF_DL, LLAMACPP
     body = await request.json()
     if not body.get("repo") or not body.get("file"):
@@ -1521,6 +1558,7 @@ def gguf_stop(request: Request):
 
 @app.post("/v1/llm/models/download")
 async def llm_model_download(request: Request):
+    _require_operator(request, "Downloading a chat model")
     body = await request.json()
     try:
         name = DOWNLOADS.start(body.get("model_id", ""))
@@ -1658,7 +1696,7 @@ def _require_job_owner(request: Request, job_id: str) -> None:
     """Members touch only their own jobs; the swarm admin and the node
     owner touch anything (handoff 132)."""
     actor = _actor(request)
-    if actor in ("admin", "node"):
+    if _role(request) in ("admin", "node"):
         return
     job = STORE.get(job_id)
     owner = (job.submitted_by or {}).get("client") if job else None
@@ -1795,12 +1833,19 @@ def create_app() -> FastAPI:
         import threading
         threading.Thread(target=_boot_llm, daemon=True,
                          name="llm-autostart").start()
+    host = config.effective_host()
+    if host != config.HOST:
+        log.warning("No node or swarm token is set, so %s would be an "
+                    "unauthenticated remote job API — binding %s instead. "
+                    "Set SILICON_NODE_TOKEN (or a swarm token) to serve "
+                    "the network.", config.HOST, host)
     log.info("%s v%s ready on %s:%d (auth: %s)", config.SERVER_NAME,
-             config.SERVER_VERSION, config.HOST, config.PORT,
-             "bearer token" if config.TOKEN else "open (LAN-only)")
+             config.SERVER_VERSION, host, config.PORT,
+             "bearer token" if config.VALID_TOKENS else "loopback only")
     return app
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(create_app(), host=config.HOST, port=config.PORT)
+    uvicorn.run(create_app(), host=config.effective_host(),
+                port=config.PORT)

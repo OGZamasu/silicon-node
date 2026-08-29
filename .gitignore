@@ -13,6 +13,8 @@ SILICON-NODE-HANDOFF.md
 # Python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
 
 # Release artifacts
 release/
