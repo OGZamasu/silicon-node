@@ -338,14 +338,15 @@ async def jobs_prune(request: Request):
     keep = body.get("keep")
     days = body.get("max_age_days")
     try:
-        return STORE.prune(
-            keep=None if keep is None else max(0, int(keep)),
-            max_age_days=None if days is None else max(0.0, float(days)))
+        keep_n = None if keep is None else max(0, int(keep))
+        max_age = None if days is None else max(0.0, float(days))
     except (TypeError, ValueError):
         raise HTTPException(
             status_code=400,
             detail="keep must be a whole number of jobs and max_age_days "
                    "a number of days.") from None
+    return await asyncio.to_thread(STORE.prune, keep=keep_n,
+                                   max_age_days=max_age)
 
 
 @app.post("/v1/jobs/{job_id}/{action}")
