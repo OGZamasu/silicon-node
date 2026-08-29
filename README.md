@@ -90,5 +90,10 @@ also an MCP server (`mcp_server.py`) so Claude or ChatGPT can drive your
 node directly, and a dashboard in any browser at
 `http://127.0.0.1:8790/ui`.
 
+Changing something? `./scripts/check.sh` runs ruff and the whole test
+suite, and needs neither the GPU nor any weights — the tests repoint every
+data path at a scratch directory. Run it before you push; this project has
+no hosted CI on purpose.
+
 MIT licensed. Built to pair with Silicon Optimizer — same versions, same
 release rhythm.
