@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from server import config
-from server.main import app
+from server.main import _role, app
 
 LOCAL = ("127.0.0.1", 51234)
 REMOTE = ("192.168.1.50", 51234)
@@ -163,3 +164,84 @@ def test_client_tokens_are_matched_exactly(tokens):
     assert CLIENTS.name_of(tokens["member"][:-1]) is None
     assert CLIENTS.name_of("") is None
     assert not CLIENTS.accepts("")
+
+
+def test_reserved_client_names_cannot_claim_roles(tokens):
+    from server.clients import CLIENTS
+
+    name, token = CLIENTS.mint("nodey")
+    try:
+        assert CLIENTS.name_of(token) == "nodey"
+    finally:
+        CLIENTS.revoke(name)
+    for name in ("node", " Admin ", "MEMBER", "swarm"):
+        with pytest.raises(ValueError, match="reserved"):
+            CLIENTS.mint(name)
+
+
+def test_a_client_named_node_is_still_only_a_member(tokens, scratch):
+    import json
+
+    from server.clients import CLIENTS, CLIENTS_FILE
+
+    rogue_token = "legacy-node-token"
+    CLIENTS_FILE.write_text(json.dumps([{
+        "name": "node", "token": rogue_token,
+        "created": "2025-01-01 00:00:00", "last_seen": None,
+        "jobs_total": 0, "jobs_by_kind": {}, "llm_requests": 0,
+    }]))
+    CLIENTS._load()
+    r = call(client(REMOTE), "post", "/v1/queue/cancel",
+             {"scope": "pending"}, rogue_token)
+    assert r.status_code == 403
+
+
+def test_harness_mutation_is_operator_only(tokens, monkeypatch):
+    from server import harness
+
+    class FakeHarness:
+        def __init__(self):
+            self.starts = 0
+            self.stops = 0
+
+        def start(self):
+            self.starts += 1
+
+        def stop(self):
+            self.stops += 1
+
+        def status(self):
+            return {"running": False}
+
+    fake = FakeHarness()
+    monkeypatch.setattr(harness, "HARNESS", fake)
+    c = client(REMOTE)
+    assert c.get("/v1/harness", headers={
+        "Authorization": f"Bearer {tokens['member']}",
+    }).status_code == 200
+    for role in ("node", "swarm"):
+        assert call(c, "post", "/v1/harness/start", None,
+                    tokens[role]).status_code == 200
+        assert call(c, "post", "/v1/harness/stop", None,
+                    tokens[role]).status_code == 200
+    assert call(c, "post", "/v1/harness/start", None,
+                tokens["member"]).status_code == 403
+    assert call(c, "post", "/v1/harness/stop", None,
+                tokens["member"]).status_code == 403
+    assert fake.starts == 2
+    assert fake.stops == 2
+
+
+@pytest.mark.parametrize("header", (
+    "X-Forwarded-For", "Forwarded", "X-Real-IP"))
+def test_forwarded_loopback_is_not_local(header):
+    value = "203.0.113.5" if header == "X-Forwarded-For" else "for=203.0.113.5"
+    headers = {header: value}
+    r = client(LOCAL).get("/v1/capabilities", headers=headers)
+    assert r.status_code == 401
+    request = Request({
+        "type": "http",
+        "client": LOCAL,
+        "headers": [(header.lower().encode(), value.encode())],
+    })
+    assert _role(request) == "member"
