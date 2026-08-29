@@ -32,6 +32,16 @@ so a one-sided edit cannot pass review quietly.
 | `job-done.json` | …finished, with `result_urls` |
 | `job-failed.json` | …failed, with a human-readable `error` |
 
+## Known asymmetry
+
+A waiting job is reported as `status: "running"` with no `progress`, so
+the Mac's `NodeJobProgress.isQueued` — which looks for a literal
+`"queued"`/`"pending"` — never fires for a silicon-node peer. The absent
+`progress` is the only signal that the job has not started, and both
+suites pin that. Fixing it properly means the node reporting `"queued"`
+and every Mac caller treating that as in-flight; worth doing, but it is a
+change to both halves at once, not a fixture edit.
+
 ## Rules the fixtures encode
 
 - A queued job reports `status: "running"` with **no** `progress`. The
