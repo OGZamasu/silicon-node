@@ -1,10 +1,24 @@
 """Silicon Node configuration — all overridable via environment."""
 
 import os
+import secrets
 from pathlib import Path
 
 SERVER_NAME = "silicon-node"
-SERVER_VERSION = "0.1.0"
+
+
+def _version() -> str:
+    """The VERSION file is what the release scripts stamp, so it is the
+    only place a version may live — /health and /v1/node advertise this
+    and the Mac reads it for compatibility messages."""
+    try:
+        return (Path(__file__).resolve().parent.parent
+                / "VERSION").read_text().strip() or "0"
+    except OSError:
+        return "0"
+
+
+SERVER_VERSION = _version()
 from .hostos import IS_WSL as _IS_WSL  # noqa: E402
 PLATFORM = "windows-wsl2-cuda" if _IS_WSL else "linux-cuda"
 
@@ -20,17 +34,17 @@ TRELLIS2_ROOT = Path(os.environ.get("TRELLIS2_ROOT", "/opt/silicon/TRELLIS.2"))
 # Network
 HOST = os.environ.get("SILICON_NODE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("SILICON_NODE_PORT", "8790"))
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
-# Auth: empty/unset = no auth required (LAN-only milestone).
-# When set, every /v1/* request must carry "Authorization: Bearer <token>".
-# /health stays open — it is a reachability probe.
+# Auth: a token is required for every off-box /v1/* request. Requests
+# arriving on the loopback interface are the owner's own dashboard and
+# tooling, and stay open. /health stays open everywhere — it is a
+# reachability probe.
 TOKEN = os.environ.get("SILICON_NODE_TOKEN", "").strip()
 
 # Swarm registry (mirrors the Mac's swarm.json): shared token + peer list.
-# The swarm token is always *accepted* as a valid bearer once present;
-# hard *enforcement* (reject missing tokens) flips on via
-# SILICON_NODE_REQUIRE_AUTH=1 only after both ends confirm their clients
-# send it — the Mac's Phase-1 LATO client historically sent no header.
+# The swarm token is accepted as a valid bearer once present, and is also
+# the admin credential for token management.
 SWARM_FILE = Path(os.environ.get("SILICON_NODE_SWARM_FILE",
                                  "/opt/silicon/swarm.json"))
 SWARM_TOKEN = ""
@@ -45,8 +59,53 @@ if SWARM_FILE.is_file():
     except Exception:  # noqa: BLE001
         pass
 
+# Strict mode: also demand a token from loopback callers. Off by default
+# because the node's own dashboard and tray GUI are loopback clients that
+# send no header; a remote caller is required to carry one regardless.
 REQUIRE_AUTH = os.environ.get("SILICON_NODE_REQUIRE_AUTH", "0") == "1"
 VALID_TOKENS = {t for t in (TOKEN, SWARM_TOKEN) if t}
+
+
+def is_loopback(ip: str | None) -> bool:
+    return bool(ip) and ip in LOOPBACK_HOSTS
+
+
+def same_token(supplied: str, secret: str) -> bool:
+    """Constant-time equality: a token check must not leak the secret one
+    comparison at a time. compare_digest rejects non-ASCII strings, and a
+    token that isn't ASCII is not one of ours anyway."""
+    if not supplied or not secret:
+        return False
+    try:
+        return secrets.compare_digest(supplied, secret)
+    except TypeError:
+        return False
+
+
+def token_valid(supplied: str) -> bool:
+    return any(same_token(supplied, t) for t in VALID_TOKENS)
+
+
+def is_swarm_token(supplied: str) -> bool:
+    return same_token(supplied, SWARM_TOKEN)
+
+
+def is_node_token(supplied: str) -> bool:
+    return same_token(supplied, TOKEN)
+
+
+def effective_host() -> str:
+    """The address the service may actually bind.
+
+    The one rule, in code rather than in the README: a node with no token
+    is not allowed to listen beyond this machine, because an
+    unauthenticated jobs API is an unauthenticated remote-execution
+    service. The Mac enforces the same rule in ControlServer.start.
+    """
+    if HOST in LOOPBACK_HOSTS or VALID_TOKENS:
+        return HOST
+    return "127.0.0.1"
+
 
 # Contract limits (mirrors the Mac client and LATO.2 defaults)
 VERT_NUM_MIN = 200
