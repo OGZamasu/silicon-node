@@ -1,0 +1,16 @@
+line-length = 79
+target-version = "py310"
+
+[lint]
+# pycodestyle + pyflakes + bugbear: the mistakes worth a red CI run on a
+# service whose whole job is driving subprocesses and GPUs.
+select = ["E", "F", "W", "B"]
+
+[lint.pycodestyle]
+# New code is written to 79; E501 is here to catch runaway lines, not to
+# reflow the docstrings and comments that already sit a few over.
+max-line-length = 88
+
+[lint.per-file-ignores]
+# FastAPI declares uploads and query params as call-valued defaults.
+"server/main.py" = ["B008"]

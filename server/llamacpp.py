@@ -20,7 +20,7 @@ from pathlib import Path
 
 log = logging.getLogger("silicon-node.llamacpp")
 
-from . import hostos
+from . import hostos  # noqa: E402 (after the logger it configures)
 
 PORT = int(os.environ.get("SILICON_NODE_GGUF_PORT", "8082"))
 ENGINE_DIR = Path(os.environ.get(
@@ -35,7 +35,7 @@ _EXE = "llama-server.exe" if hostos.IS_WSL else "llama-server"
 
 
 def _path_arg(p: Path) -> str:
-    """A path as the ENGINE must see it (F:\... through interop on WSL,
+    r"""A path as the ENGINE must see it (F:\... through interop on WSL,
     the POSIX path itself on Linux)."""
     return hostos.win_path(p) if hostos.IS_WSL else str(p)
 
@@ -159,7 +159,7 @@ class LlamaCppManager:
                     "No usable build for this OS in the latest llama.cpp "
                     "release.")
             ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-            for i, a in enumerate([asset] + ([cudart] if cudart else [])):
+            for a in [asset] + ([cudart] if cudart else []):
                 self.engine_install = {
                     "stage": f"downloading {a['name']}", "error": None}
                 dest = ENGINE_DIR / a["name"]
