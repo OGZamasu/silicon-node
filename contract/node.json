@@ -58,9 +58,9 @@
   "queue": {
     "pending": [
       {
-        "held": false,
         "id": "job-90ab12cd34ef56789012",
-        "kind": "image-to-mesh"
+        "kind": "image-to-mesh",
+        "submitted_by": "studio-mac"
       }
     ],
     "running": {
@@ -68,12 +68,7 @@
       "kind": "text-to-video",
       "progress": 0.42,
       "started_at": 1756461321.5,
-      "submitted_by": {
-        "client": "mac-studio",
-        "ip": "100.64.0.3",
-        "proxied": true,
-        "user_agent": "Silicon/1.4"
-      }
+      "submitted_by": "mac-studio"
     }
   },
   "serving": {
