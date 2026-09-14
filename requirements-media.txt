@@ -12,3 +12,6 @@ safetensors>=0.4
 pillow>=10
 imageio>=2.34
 imageio-ffmpeg>=0.5
+# GGUF transformers (LTX-2.3 Uncensored) and audio muxing for LTX-2 clips.
+gguf>=0.10
+av>=12

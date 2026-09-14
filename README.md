@@ -12,7 +12,8 @@ leaving your house.
 ## What your PC can do
 
 - **Make videos from text.** Two engines — one fast for trying ideas, one
-  slower for the good version.
+  slower for the good version — plus an optional adult-content LTX-2.3
+  merge from the Store, with sound.
 - **Turn a picture into a 3D model.** Clean, game-ready geometry, not a
   blobby scan.
 - **Make a photo talk.** Portrait in, audio in, lip-synced clip out.

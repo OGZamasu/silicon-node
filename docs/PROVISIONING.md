@@ -85,6 +85,19 @@ LTX-2 is 95 GB across 51 shards — the systemd unit below raises the file
 descriptor limit for it, and its transformer + text encoder load
 NF4-quantized automatically (bf16 does not fit a 24 GB card).
 
+Optional: the adult-content LTX-2.3 merge is one 18 GB GGUF file, not the
+whole 240 GB repo — it reuses the distilled install's text encoder and
+decoders, so install that first. The dashboard's Store page does the same
+fetch.
+
+```bash
+conda run -n lato2 python -c "from huggingface_hub import hf_hub_download; hf_hub_download('ChrisColeTech/LTX-2.3-uncensored-v1.4-FP8', 'split/diffusion_models/ltxv23_uncensored_v1.4_Q6_K.gguf')"
+```
+
+Its loader needs `gguf` and `av` from requirements-media.txt. If the card
+runs out of memory at load, set `SILICON_NODE_LTX_UNCENSORED_FILE` to the
+`_Q4_K_M.gguf` sibling in the same folder (14 GB) and fetch that instead.
+
 ## 5. Portrait abilities
 
 - **LivePortrait** (video-driven): clone to `/opt/silicon/LivePortrait`,

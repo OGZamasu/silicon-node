@@ -340,7 +340,9 @@ _CAP_DESCRIPTIONS = {
         "Generates short video clips from a text prompt, optionally "
         "starting from an image. Wan 2.2 TI2V-5B is the quality engine; "
         "LTX-2 distilled renders the same clip about 2.6× faster for "
-        "iteration — choose with the model field.",
+        "iteration; LTX-2.3 Uncensored v1.4 (installed from the store) is "
+        "the adult-content merge and its clips carry audio — choose with "
+        "the model field.",
     "text-to-image":
         "Renders still images from a text prompt. Qwen-Image 20B is the "
         "quality engine (it can put readable text in images); Sana is "
@@ -412,7 +414,8 @@ def capability_list() -> list[dict]:
                       "the shared 24 GB card. Submit POST /v1/jobs "
                       '{"capability":"text-to-video","prompt":...} with '
                       "optional negative_prompt/frames/width/height/steps/"
-                      "seed; result_urls carries the .mp4."
+                      "seed; result_urls carries the .mp4. Models: "
+                      + ", ".join(_installed_video_models()) + "."
                       if _video_ready() else
                       "Wan 2.2 weights or diffusers still downloading — "
                       "flips ready automatically.",
@@ -490,6 +493,17 @@ def capability_list() -> list[dict]:
                 "Managed through /v1/llm rather than the jobs API.")
             c["enabled"] = True
     return caps
+
+
+def _installed_video_models() -> list[str]:
+    """The model ids POST /v1/text-to-video accepts right now."""
+    from . import video  # noqa: PLC0415
+    out = ["wan22-ti2v-5b"] if video.ENGINE.weights_present() else []
+    if video.ENGINE.ltx_ready():
+        out.append("ltx2-distilled")
+    if video.ENGINE.ltx_uncensored_ready():
+        out.append("ltx23-uncensored")
+    return out
 
 
 def _video_ready() -> bool:
@@ -757,6 +771,12 @@ def _model_admin() -> dict:
             "busy": "the LTX-2 pipeline is loaded right now"
                     if getattr(video.ENGINE, "_pipe_ltx", None)
                     is not None else None},
+        "ltx23-uncensored": {
+            "kind": "hf", "loc": _hf_repo_root(video.LTX_UNCENSORED_REPO),
+            "cache_key": "ltx-unc", "deletable": True,
+            "busy": "the LTX-2.3 uncensored pipeline is loaded right now"
+                    if getattr(video.ENGINE, "_pipe_ltx_unc", None)
+                    is not None else None},
         "liveportrait": {
             "kind": "dir",
             "loc": portrait.LP_ROOT / "pretrained_weights",
@@ -844,6 +864,7 @@ def models_inventory():
     trellis_ok, _detail = pipeline.ENGINE.trellis_available()
     wan_inst = video.ENGINE.weights_present()
     ltx_inst = video.ENGINE.ltx_ready()
+    ltx_unc_inst = video.ENGINE.ltx_uncensored_ready()
     llama = LLAMACPP.status()
 
     models = [
@@ -891,6 +912,17 @@ def models_inventory():
             "installed": ltx_inst, "ready": ltx_inst,
             "loaded": getattr(video.ENGINE, "_pipe_ltx", None) is not None,
             "size_gb": _sized("ltx", lambda: _hf_size_gb(video.LTX_REPO)),
+        },
+        {
+            "id": "ltx23-uncensored", "name": "LTX-2.3 Uncensored v1.4",
+            "capability": "text-to-video", "engine": "diffusers",
+            "repo": (video.LTX_UNCENSORED_REPO + " ("
+                     + Path(video.LTX_UNCENSORED_FILE).name + ")"),
+            "installed": ltx_unc_inst, "ready": ltx_unc_inst,
+            "loaded": getattr(video.ENGINE, "_pipe_ltx_unc", None)
+            is not None,
+            "size_gb": _sized("ltx-unc", lambda: _hf_size_gb(
+                video.LTX_UNCENSORED_REPO)),
         },
         {
             "id": "liveportrait", "name": "LivePortrait",
@@ -1196,6 +1228,7 @@ async def text_to_video_submit(request: Request):
     body = await request.json()
     model = (body.get("model") or "wan22-ti2v-5b").strip()
     from . import video as _video
+    engines = {"ltx2-distilled": "ltx", "ltx23-uncensored": "ltx-uncensored"}
     if model == "ltx2-distilled":
         if not _video.ENGINE.ltx_ready():
             raise HTTPException(
@@ -1203,11 +1236,20 @@ async def text_to_video_submit(request: Request):
                 detail="LTX-2 distilled is downloading to this node right "
                        "now — try again in a few minutes, or use Wan 2.2 "
                        "5B meanwhile.")
+    elif model == "ltx23-uncensored":
+        if not _video.ENGINE.ltx_uncensored_ready():
+            raise HTTPException(
+                status_code=503,
+                detail="LTX-2.3 Uncensored isn't installed on this node yet "
+                       "— install it from the node's Store page (it needs "
+                       "LTX-2 distilled installed too), or use another "
+                       "model meanwhile.")
     elif model not in ("wan22-ti2v-5b", "text-to-video", "wan2.2-ti2v-5b"):
         raise HTTPException(
             status_code=400,
-            detail=f"This node serves wan22-ti2v-5b and ltx2-distilled; "
-                   f"{model} isn't one of them.")
+            detail=f"This node serves wan22-ti2v-5b, ltx2-distilled and "
+                   f"ltx23-uncensored; {model} isn't one of them.")
+    engine = engines.get(model, "wan")
     prompt = (body.get("prompt") or "").strip()
     if not prompt and not body.get("image_b64"):
         raise HTTPException(status_code=400,
@@ -1220,7 +1262,10 @@ async def text_to_video_submit(request: Request):
         seconds = float(body.get("seconds", 2))
     except (TypeError, ValueError):
         seconds = 2.0
-    frames = max(17, min(121, int(round(seconds * 24)) + 1))
+    # Wan and distilled LTX top out at five seconds; the uncensored merge
+    # takes the Mac's full ten (its card says 40 s, the 24 GB card doesn't).
+    max_frames = 241 if engine == "ltx-uncensored" else 121
+    frames = max(17, min(max_frames, int(round(seconds * 24)) + 1))
     res = str(body.get("resolution", "720p")).lower()
     width, height = (1280, 704)
     if "x" in res:
@@ -1231,7 +1276,11 @@ async def text_to_video_submit(request: Request):
     params = {"prompt": prompt, "frames": frames,
               "width": width, "height": height,
               "seed": body.get("seed"),
-              "engine": "ltx" if model == "ltx2-distilled" else "wan"}
+              "engine": engine}
+    # Optional knobs the Mac doesn't send but an agent might.
+    for key in ("steps", "guidance", "negative_prompt"):
+        if body.get(key) not in (None, ""):
+            params[key] = body[key]
     _require_enabled("text-to-video")
     job = STORE.submit("text-to-video", params, defer=True)
     job.submitted_by = _submitter(request, "text-to-video")

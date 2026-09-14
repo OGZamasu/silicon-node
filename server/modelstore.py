@@ -5,6 +5,10 @@ Installs run through the jobs queue so progress/%/eta ride the existing
 machinery and show up in every queue view. Installed-ness is read from
 the Hugging Face cache itself (the disk is the truth); this file's JSON
 only records who installed/deleted what and when.
+
+An entry may name `files` to fetch just those out of its repo instead of
+the whole snapshot — the uncensored LTX transformer is one 18 GB file in
+a 240 GB tree of quants nobody needs all of.
 """
 
 from __future__ import annotations
@@ -102,6 +106,19 @@ def _catalog() -> dict[str, dict]:
             "note": "Same clip ~2.6x faster than Wan for iteration "
                     "(NF4 at load).",
         },
+        "ltx23-uncensored": {
+            "name": "LTX-2.3 Uncensored v1.4",
+            "capability": "text-to-video",
+            "repos": [video.LTX_UNCENSORED_REPO],
+            "files": [video.LTX_UNCENSORED_FILE],
+            "est_bytes": 17_800_000_000,
+            "license": "Unlisted (LTX-2.3 merge, not-for-all-audiences)",
+            "recommended": False,
+            "installable": True,
+            "note": "Adult-content merge of LTX-2.3 (Eros10 + DMD-distilled "
+                    "LoRAs baked in); clips carry audio. Needs LTX-2.3 "
+                    "distilled installed — it borrows that pipeline.",
+        },
         "trellis2": {
             "name": "TRELLIS.2-4B + DINOv3",
             "capability": "image-to-mesh",
@@ -122,9 +139,15 @@ def _repo_dir(repo: str) -> Path:
 
 def _installed(entry: dict) -> bool:
     try:
-        from huggingface_hub import snapshot_download  # noqa: PLC0415
+        from huggingface_hub import (  # noqa: PLC0415
+            hf_hub_download, snapshot_download)
+        files = entry.get("files")
         for repo in entry["repos"]:
-            snapshot_download(repo, local_files_only=True)
+            if files:
+                for name in files:
+                    hf_hub_download(repo, name, local_files_only=True)
+            else:
+                snapshot_download(repo, local_files_only=True)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -248,9 +271,15 @@ def install_job(job: Job, progress) -> list[str]:
 
     def work() -> None:
         try:
-            from huggingface_hub import snapshot_download  # noqa: PLC0415
+            from huggingface_hub import (  # noqa: PLC0415
+                hf_hub_download, snapshot_download)
+            files = entry.get("files")
             for repo in entry["repos"]:
-                snapshot_download(repo)
+                if files:
+                    for name in files:
+                        hf_hub_download(repo, name)
+                else:
+                    snapshot_download(repo)
         except Exception as exc:  # noqa: BLE001
             err.append(exc)
         finally:
