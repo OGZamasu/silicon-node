@@ -34,6 +34,11 @@ enforces the same rule on its side.
   keeps it in the browser's localStorage and scrubs it from the URL. A
   dashboard opened by hand (another PC, or the Mac's browser on the
   tailnet) asks for the token once, on its first 401.
+- **A client token can carry the admin role.** Only the swarm admin
+  mints tokens, and it may mint one as `admin` — for its own Mac, so the
+  node's activity log names that machine while it keeps the rights of the
+  swarm token. Everything else minted is a member. Roles never reach
+  credential management: minting and revoking stay behind the swarm token.
 - **Members are not operators.** A paired client token submits jobs and
   chats. Changing abilities, uninstalling models, starting downloads,
   pausing serving, stopping engines and revealing folders on the host

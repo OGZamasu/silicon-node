@@ -40,6 +40,8 @@ def tokens(monkeypatch):
     monkeypatch.setattr(config, "VALID_TOKENS",
                         {"node-token-value", "swarm-token-value"})
     name, member = CLIENTS.mint("test-member")
+    owner, ownermac = CLIENTS.mint("test-owner-mac", role="admin")
     yield {"node": "node-token-value", "swarm": "swarm-token-value",
-           "member": member}
+           "member": member, "ownermac": ownermac}
     CLIENTS.revoke(name)
+    CLIENTS.revoke(owner)

@@ -121,6 +121,36 @@ def test_operators_are_not_blocked(tokens, method, path, body):
         call(client(REMOTE), "post", path, {"paused": False}, tokens["node"])
 
 
+@pytest.mark.parametrize(("method", "path", "body"), OPERATOR_ROUTES)
+def test_an_admin_role_client_operates_the_node(tokens, method, path, body):
+    """The swarm admin's own Mac wants to be attributed by name, so it
+    mints itself a client token like everyone else — minted with the
+    admin role, that token operates the node the way the swarm token
+    does."""
+    r = call(client(REMOTE), method, path, body, tokens["ownermac"])
+    assert r.status_code != 403, f"{method} {path} blocked the admin client"
+    if path == "/v1/serving":
+        call(client(REMOTE), "post", path, {"paused": False}, tokens["node"])
+
+
+def test_an_admin_role_client_still_cannot_manage_clients(tokens):
+    """Roles grant operation, not credential management: minting and
+    revoking stay behind the swarm token itself."""
+    r = call(client(REMOTE), "get", "/swarm/clients", None,
+             tokens["ownermac"])
+    assert r.status_code == 403
+
+
+def test_client_listing_shows_roles_and_minting_refuses_unknown_ones(tokens):
+    r = call(client(REMOTE), "get", "/swarm/clients", None, tokens["swarm"])
+    roles = {c["name"]: c["role"] for c in r.json()}
+    assert roles["test-member"] == "member"
+    assert roles["test-owner-mac"] == "admin"
+    r = call(client(REMOTE), "post", "/swarm/clients",
+             {"name": "test-root", "role": "root"}, tokens["swarm"])
+    assert r.status_code == 400
+
+
 def test_unauthenticated_remote_never_reaches_an_operator_route(tokens):
     for method, path, body in OPERATOR_ROUTES:
         r = call(client(REMOTE), method, path, body, None)

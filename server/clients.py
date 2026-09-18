@@ -50,7 +50,14 @@ class ClientStore:
         os.chmod(tmp, 0o600)
         tmp.replace(CLIENTS_FILE)
 
-    def mint(self, name: str) -> tuple[str, str]:
+    ROLES = ("member", "admin")
+
+    def mint(self, name: str, role: str = "member") -> tuple[str, str]:
+        """A per-client token. `role` is what the credential grants — a
+        member submits jobs and chats, an admin operates the node like the
+        swarm token does. Only the swarm admin can mint, so an admin-role
+        token is the admin choosing to give one machine (typically their
+        own Mac, which wants to be attributed by name) their rights."""
         name = name.strip()
         if not name or len(name) > 80:
             raise ValueError("A client needs a short, non-empty name.")
@@ -58,11 +65,14 @@ class ClientStore:
             raise ValueError(
                 "That name is reserved for the node's own roles — pick "
                 "another.")
+        if role not in self.ROLES:
+            raise ValueError(
+                f"A client role is one of {', '.join(self.ROLES)}.")
         with self._lock:
             if any(c["name"] == name for c in self._clients):
                 raise KeyError(name)
             token = secrets.token_urlsafe(32)  # never logged
-            c = {"name": name, "token": token,
+            c = {"name": name, "token": token, "role": role,
                  "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                  "last_seen": None,
                  "jobs_total": 0, "jobs_by_kind": {}, "llm_requests": 0}
@@ -109,6 +119,7 @@ class ClientStore:
     def listing(self) -> list[dict]:
         with self._lock:
             return [{"name": c["name"], "created": c["created"],
+                     "role": c.get("role", "member"),
                      "last_seen": c["last_seen"],
                      "jobs_total": c.get("jobs_total", 0),
                      "jobs_by_kind": c.get("jobs_by_kind", {}),
@@ -123,6 +134,15 @@ class ClientStore:
             if config.same_token(token, candidate):
                 return c
         return None
+
+    def role_of(self, token: str) -> str | None:
+        """What a live client token grants: "member" or "admin". Records
+        minted before roles existed are members."""
+        if not token:
+            return None
+        with self._lock:
+            c = self._match(token)
+            return (c.get("role") or "member") if c else None
 
     def name_of(self, token: str) -> str | None:
         """The paired client's name for a live token, else None."""
