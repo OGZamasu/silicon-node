@@ -76,14 +76,18 @@ def _catalog() -> dict[str, dict]:
         "flux2-dev": {
             "name": "FLUX.2 [dev]",
             "capability": "text-to-image",
-            "repos": ["black-forest-labs/FLUX.2-dev"],
-            "est_bytes": 110_000_000_000,
+            "repos": [image.FLUX2_REPO],
+            # The diffusers tree only: the repo's single-file copies of
+            # the same weights are 64 GB nobody here reads.
+            "ignore": image.FLUX2_SKIP,
+            "est_bytes": 113_000_000_000,
             "license": "BFL non-commercial",
             "recommended": False,
-            "installable": False,
-            "note": "Deliberate download only: non-commercial license, "
-                    "and at ~110 GB bf16 it has no runtime lane on this "
-                    "24 GB card yet — ask for one before installing.",
+            "installable": True,
+            "note": "FLUX.2 [dev] through diffusers, NF4-quantized at "
+                    "load like Qwen-Image. Gated on Hugging Face: accept "
+                    "the licence there and set the node's HF token "
+                    "(set-tokens.ps1) before installing. ~113 GB.",
         },
         "wan22-ti2v-5b": {
             "name": "Wan 2.2 TI2V-5B",
@@ -147,7 +151,8 @@ def _installed(entry: dict) -> bool:
                 for name in files:
                     hf_hub_download(repo, name, local_files_only=True)
             else:
-                snapshot_download(repo, local_files_only=True)
+                snapshot_download(repo, local_files_only=True,
+                                  ignore_patterns=entry.get("ignore"))
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -279,7 +284,8 @@ def install_job(job: Job, progress) -> list[str]:
                     for name in files:
                         hf_hub_download(repo, name)
                 else:
-                    snapshot_download(repo)
+                    snapshot_download(repo,
+                                      ignore_patterns=entry.get("ignore"))
         except Exception as exc:  # noqa: BLE001
             err.append(exc)
         finally:

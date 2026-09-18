@@ -36,8 +36,17 @@ SANA_REPO = os.environ.get(
 # store install.
 SDXL_REPO = os.environ.get("SILICON_NODE_SDXL_MODEL",
                            "stabilityai/stable-diffusion-xl-base-1.0")
+# FLUX.2 [dev]: a 32B transformer with a 24B Mistral text encoder, 112 GB
+# in bf16. Both NF4-quantize at load like Qwen-Image and offload one at a
+# time, which is what lets it run on a 24 GB card at all. Gated on
+# Hugging Face (BFL non-commercial licence; the node needs an HF token).
+FLUX2_REPO = os.environ.get("SILICON_NODE_FLUX2_MODEL",
+                            "black-forest-labs/FLUX.2-dev")
+# The repo also carries the same weights as single files for ComfyUI;
+# diffusers never reads them, so the store leaves them out (64 GB).
+FLUX2_SKIP = ["flux2-dev.safetensors", "ae.safetensors"]
 MODEL_REPOS = {"qwen-image": QWEN_REPO, "sana": SANA_REPO,
-               "sdxl": SDXL_REPO}
+               "sdxl": SDXL_REPO, "flux2-dev": FLUX2_REPO}
 
 _lock = threading.RLock()
 
@@ -55,6 +64,7 @@ class ImageEngine:
     def __init__(self) -> None:
         self._pipe_qwen = None
         self._pipe_sana = None
+        self._pipe_flux2 = None
 
     def installed_models(self) -> list[str]:
         return [mid for mid, repo in MODEL_REPOS.items()
@@ -70,12 +80,14 @@ class ImageEngine:
     def unload(self) -> None:
         with _lock:
             if (self._pipe_qwen is None and self._pipe_sana is None
-                    and getattr(self, "_pipe_sdxl", None) is None):
+                    and getattr(self, "_pipe_sdxl", None) is None
+                    and self._pipe_flux2 is None):
                 return
             log.info("unloading image pipeline(s)")
             self._pipe_qwen = None
             self._pipe_sana = None
             self._pipe_sdxl = None
+            self._pipe_flux2 = None
         import gc  # noqa: PLC0415
         gc.collect()
         try:
@@ -109,6 +121,33 @@ class ImageEngine:
             except Exception:  # noqa: BLE001
                 pass
             self._pipe_qwen = p
+            return p
+
+    def _ensure_flux2(self):
+        with _lock:
+            if self._pipe_flux2 is not None:
+                return self._pipe_flux2
+            import torch  # noqa: PLC0415
+            from diffusers import (  # noqa: PLC0415
+                Flux2Pipeline, PipelineQuantizationConfig)
+            self.unload()  # one image pipeline resident at a time
+            log.info("loading %s (NF4-quantized)…", FLUX2_REPO)
+            q = PipelineQuantizationConfig(
+                quant_backend="bitsandbytes_4bit",
+                quant_kwargs={
+                    "load_in_4bit": True,
+                    "bnb_4bit_quant_type": "nf4",
+                    "bnb_4bit_compute_dtype": torch.bfloat16},
+                components_to_quantize=["transformer", "text_encoder"])
+            p = Flux2Pipeline.from_pretrained(
+                FLUX2_REPO, torch_dtype=torch.bfloat16,
+                quantization_config=q)
+            p.enable_model_cpu_offload()
+            try:
+                p.vae.enable_tiling()
+            except Exception:  # noqa: BLE001
+                pass
+            self._pipe_flux2 = p
             return p
 
     def _ensure_sana(self):
@@ -189,6 +228,11 @@ class ImageEngine:
             pipe = self._ensure_sdxl()
             steps = min(60, max(10, int(job.params.get(
                 "steps", cs.get("sdxl_steps", 30)))))
+        elif model == "flux2-dev":
+            pipe = self._ensure_flux2()
+            steps = min(50, max(4, int(job.params.get(
+                "steps", cs.get("flux2_steps", 28)))))
+            job.receipts["image_quant"] = "nf4"
         else:
             pipe = self._ensure_qwen()
             steps = min(60, max(10, int(job.params.get(
@@ -203,7 +247,11 @@ class ImageEngine:
         kwargs = dict(prompt=prompt, width=width, height=height,
                       num_inference_steps=steps, generator=gen,
                       callback_on_step_end=_cb)
-        if negative:
+        if model == "flux2-dev":
+            # Guidance-distilled: a guidance value, no negative prompt.
+            kwargs["guidance_scale"] = float(job.params.get(
+                "guidance", cs.get("flux2_guidance", 4.0)))
+        elif negative:
             kwargs["negative_prompt"] = negative
             if model == "qwen-image":
                 # Qwen-Image only applies the negative with true CFG on.
