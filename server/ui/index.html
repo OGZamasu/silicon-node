@@ -1101,6 +1101,16 @@ async function toggleRepo(repo) {
     renderSearch();
   }
 }
+async function dlPick(repo, file, mmproj, btn) {
+  btn.disabled = true; btn.textContent = "Queued";
+  const body = { repo, file };
+  if (mmproj) body.mmproj = mmproj;
+  try { await j("/v1/gguf/download", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body) }); }
+  catch (e) { alert("Download failed: " + e); }
+  poll();
+}
 async function dlGguf(repo, file, btn) {
   btn.disabled = true; btn.textContent = "Queued";
   try { await j("/v1/gguf/download", { method: "POST",
@@ -1121,15 +1131,36 @@ function renderGguf() {
   const g = S.gguf;
   if (!g) return;
   const eng = $("#gguf-engine");
+  const lines = [];
   if (g.engine_install && !g.engine_install.error)
-    eng.innerHTML = `<span class="spin"></span>engine: ${g.engine_install.stage}`;
+    lines.push(`<span class="spin"></span>engine: ${g.engine_install.stage}`);
   else if (g.engine_install && g.engine_install.error)
-    eng.innerHTML = `<span class="err">engine install failed: ${g.engine_install.error}</span>`;
-  else eng.textContent = g.engine_installed
+    lines.push(`<span class="err">engine install failed: ${g.engine_install.error}</span>`);
+  else lines.push(g.engine_installed
     ? "llama.cpp engine installed · serves OpenAI API on port " + g.port
-    : "The llama.cpp engine downloads automatically with your first model.";
+    : "The llama.cpp engine downloads automatically with your first model.");
+  // PrismML's fork, fetched alongside the first ternary Bonsai file.
+  if (g.prism_engine_install && !g.prism_engine_install.error)
+    lines.push(`<span class="spin"></span>PrismML fork: ${g.prism_engine_install.stage}`);
+  else if (g.prism_engine_install && g.prism_engine_install.error)
+    lines.push(`<span class="err">PrismML fork install failed: ${g.prism_engine_install.error}</span>`);
+  else if (g.prism_engine_installed)
+    lines.push("PrismML llama.cpp fork installed · serves the ternary Bonsai models");
+  eng.innerHTML = lines.join("<br>");
   const dls = g.downloads || {};
   const rows = [];
+  // One-click picks: named because the search can't tell you what they
+  // need (a companion projector, a fork). Hidden once the file is here.
+  const have = new Set([...(g.models || []).map(m => m.file), ...Object.keys(dls)]);
+  for (const p of g.picks || []) {
+    if (have.has(p.file)) continue;
+    rows.push(`<div class="row"><span class="dot"></span>
+      <div class="grow"><div class="name">${p.name}</div>
+      <div class="sub">${p.note}</div></div>
+      <span class="num">${p.size_gb} GB</span>
+      <button class="primary" onclick="dlPick('${p.repo}', '${p.file}', '${p.mmproj || ""}', this)">Download</button>
+    </div>`);
+  }
   for (const [n, d] of Object.entries(dls)) {
     if (d.error) rows.push(`<div class="row"><span class="dot no"></span>
       <div class="grow"><div class="name">${n}</div>
@@ -1147,7 +1178,7 @@ function renderGguf() {
     rows.push(`<div class="row">
       <span class="dot ${loaded ? "ok" : "warn"}"></span>
       <div class="grow"><div class="name">${m.file}</div>
-      <div class="sub">${loaded ? "loaded and serving" : "installed"}</div></div>
+      <div class="sub">${loaded ? "loaded and serving" : "installed"}${m.engine === "prism" ? " · PrismML fork" : ""}${m.mmproj ? " · vision" : ""}</div></div>
       <span class="num">${m.size_gb} GB</span>
       ${loaded ? `<button onclick="j('/v1/gguf/stop',{method:'POST'}).then(poll)">Unload</button>`
                : `<button class="primary" onclick="loadGguf('${m.file}', this)">Load</button>`}

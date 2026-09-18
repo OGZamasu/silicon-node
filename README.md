@@ -20,7 +20,9 @@ leaving your house.
 - **Animate a portrait.** Act out a performance on camera and a photo
   copies it.
 - **Run chat AI.** A 27B model with a huge memory, or any GGUF model you
-  download — with a one-click model library.
+  download — with a one-click model library. Bonsai 2 27B, PrismML's
+  1.76-bit ternary 27B, is a one-click pick; the llama.cpp fork it needs
+  fetches itself.
 
 Your Mac sees all of it automatically: live progress bars, a queue you
 can reorder or cancel, and a card showing exactly what your GPU is doing

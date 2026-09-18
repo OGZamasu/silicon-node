@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -27,6 +28,12 @@ ENGINE_DIR = Path(os.environ.get(
     "SILICON_NODE_LLAMACPP_DIR",
     "/mnt/f/Windows Silicon Optimizer/silicon-node/runtime/llamacpp"
     if hostos.IS_WSL else "/opt/silicon/llamacpp"))
+# PrismML's llama.cpp fork, for Ternary Bonsai 2's PTQ1_0/PQ2_0 packings —
+# stock builds refuse those files outright. Same layout as the stock
+# engine, one folder over, fetched from the fork's own releases.
+PRISM_ENGINE_DIR = Path(os.environ.get(
+    "SILICON_NODE_LLAMACPP_PRISM_DIR", str(ENGINE_DIR.parent / "llamacpp-prism")))
+PRISM_REPO = "PrismML-Eng/llama.cpp"
 GGUF_DIR = Path(os.environ.get(
     "SILICON_NODE_GGUF_DIR",
     "/mnt/f/ai-model-cache/gguf"
@@ -38,6 +45,42 @@ def _path_arg(p: Path) -> str:
     """A path as the ENGINE must see it (F:\... through interop on WSL,
     the POSIX path itself on Linux)."""
     return hostos.win_path(p) if hostos.IS_WSL else str(p)
+
+
+# The library as the dashboard names it. main.py imported this before it
+# existed, which turned every GET /v1/models into a 500.
+GGUF_DIR_WIN = _path_arg(GGUF_DIR)
+
+_PRISM_QUANTS = re.compile(r"-(PTQ1_0|PQ2_0)\.gguf$", re.IGNORECASE)
+
+
+def needs_prism(model_file: str) -> bool:
+    """PrismML's ternary packings (Ternary Bonsai 2) load only on their fork."""
+    return bool(_PRISM_QUANTS.search(Path(model_file).name))
+
+
+def mmproj_for(model_file: str) -> Path | None:
+    """The vision projector shipped beside a 27B Bonsai GGUF, if it was
+    downloaded: `<stem>-mmproj-*.gguf`, Q8_0 preferred. None = text only."""
+    stem = re.sub(r"-[A-Za-z0-9_]+\.gguf$", "", Path(model_file).name)
+    candidates = sorted(GGUF_DIR.glob(f"{stem}-mmproj-*.gguf"))
+    if not candidates:
+        return None
+    return next((c for c in candidates if "Q8_0" in c.name), candidates[0])
+
+
+# One-click picks beside the Hugging Face search: models worth naming because
+# the search can't tell you what they need (a companion file, a fork).
+GGUF_PICKS = [
+    {"id": "bonsai-2-27b", "name": "Bonsai 2 27B (PrismML, ternary)",
+     "repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+     "file": "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+     "mmproj": "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+     "size_gb": 6.6,
+     "note": "Qwen3.8 27B in 1.76-bit ternary weights: 98% of its benchmarks "
+             "in 5.9 GB, vision and tool calling included. Needs PrismML's "
+             "llama.cpp fork, fetched automatically with the file."},
+]
 
 # The Mac's "sharp" Qwen chat template (silicon-optimizer #9): a jinja
 # replacement template handed to llama-server, so answers lead with the
@@ -111,86 +154,152 @@ class LlamaCppManager:
         self._logfile = ENGINE_DIR / "llama-server.log"
         self.model_file: str | None = None
         self.engine_install: dict | None = None  # progress while fetching
+        self.prism_engine_install: dict | None = None
+        self.engine_flavor: str | None = None  # which engine is serving
 
     # -- engine install ---------------------------------------------------
+
+    @staticmethod
+    def engine_dir(flavor: str = "stock") -> Path:
+        return PRISM_ENGINE_DIR if flavor == "prism" else ENGINE_DIR
 
     @property
     def engine_installed(self) -> bool:
         return (ENGINE_DIR / _EXE).exists()
 
-    def install_engine_async(self) -> None:
-        if self.engine_installed or self.engine_install:
-            return
-        self.engine_install = {"stage": "resolving", "error": None}
-        threading.Thread(target=self._install_engine, daemon=True).start()
+    @property
+    def prism_engine_installed(self) -> bool:
+        return (PRISM_ENGINE_DIR / _EXE).exists()
 
-    def _install_engine(self) -> None:
-        try:
-            rel = _fetch_json("https://api.github.com/repos/ggml-org/"
-                              "llama.cpp/releases/latest")
-            names = rel.get("assets", [])
-            if hostos.IS_WSL:
-                asset = next(
-                    (a for a in names
+    def engine_ready(self, flavor: str = "stock") -> bool:
+        return (self.prism_engine_installed if flavor == "prism"
+                else self.engine_installed)
+
+    def _progress(self, flavor: str, state: dict | None) -> None:
+        if flavor == "prism":
+            self.prism_engine_install = state
+        else:
+            self.engine_install = state
+
+    def install_engine_async(self, flavor: str = "stock") -> None:
+        if flavor == "prism":
+            if self.prism_engine_installed or self.prism_engine_install:
+                return
+        elif self.engine_installed or self.engine_install:
+            return
+        self._progress(flavor, {"stage": "resolving", "error": None})
+        threading.Thread(target=self._install_engine, args=(flavor,),
+                         daemon=True).start()
+
+    @staticmethod
+    def _matching_assets(assets: list[dict]) -> tuple[dict | None, dict | None]:
+        """The engine build for this host and, on WSL, the CUDA runtime zip
+        that goes with it. CUDA 12.4 first: it is the toolkit the WSL side
+        was provisioned with, and every driver here runs it."""
+        def _rank(a):
+            return "cuda-12.4" not in a["name"].lower()
+        if hostos.IS_WSL:
+            cands = [a for a in assets
                      if "win" in a["name"].lower()
                      and "cuda" in a["name"].lower()
                      and "x64" in a["name"].lower()
                      and a["name"].endswith(".zip")
-                     and "cudart" not in a["name"].lower()), None)
-                cudart = next(
-                    (a for a in names
-                     if "cudart" in a["name"].lower()
-                     and a["name"].endswith(".zip")), None)
-            else:
-                def _lin(a):
-                    n = a["name"].lower()
-                    return (("ubuntu" in n or "linux" in n)
-                            and "x64" in n and n.endswith(".zip"))
-                # Prefer a CUDA build when the release carries one; the
-                # plain ubuntu build still serves (CPU-only) rather than
-                # failing the install outright.
-                asset = (next((a for a in names
-                               if _lin(a) and "cuda" in a["name"].lower()),
-                              None)
-                         or next((a for a in names if _lin(a)), None))
-                cudart = None
+                     and "cudart" not in a["name"].lower()]
+            asset = min(cands, key=_rank) if cands else None
+            cudart = None
+            if asset:
+                token = next((t for t in ("cuda-12.4", "cuda-12.8", "cuda-13.3",
+                                          "cuda-13.4")
+                              if t in asset["name"].lower()), "cuda")
+                cudart = next((a for a in assets
+                               if "cudart" in a["name"].lower()
+                               and token in a["name"].lower()
+                               and a["name"].endswith(".zip")), None)
+            return asset, cudart
+
+        def _lin(a):
+            n = a["name"].lower()
+            return (("ubuntu" in n or "linux" in n) and "x64" in n
+                    and (n.endswith(".zip") or n.endswith(".tar.gz")))
+        # Prefer a CUDA build when the release carries one; the plain
+        # ubuntu build still serves (CPU-only) rather than failing outright.
+        cuda = [a for a in assets if _lin(a) and "cuda" in a["name"].lower()]
+        asset = (min(cuda, key=_rank) if cuda
+                 else next((a for a in assets if _lin(a)), None))
+        return asset, None
+
+    def _release_for(self, flavor: str) -> dict:
+        """Stock: upstream's latest. Prism: the newest fork release that
+        actually has this host's build attached — a fresh tag can sit for
+        an hour with only some platforms uploaded."""
+        if flavor != "prism":
+            return _fetch_json("https://api.github.com/repos/ggml-org/"
+                               "llama.cpp/releases/latest")
+        releases = _fetch_json(
+            f"https://api.github.com/repos/{PRISM_REPO}/releases?per_page=10")
+        for rel in releases:
+            if rel.get("draft") or rel.get("prerelease"):
+                continue
+            asset, _ = self._matching_assets(rel.get("assets", []))
+            if asset and asset["name"].startswith("llama-prism-"):
+                return rel
+        raise RuntimeError(
+            "No PrismML llama.cpp release carries a build for this host yet.")
+
+    @staticmethod
+    def _extract(archive: Path, target: Path) -> None:
+        if archive.name.endswith(".tar.gz"):
+            import tarfile  # noqa: PLC0415
+            with tarfile.open(archive) as t:
+                try:
+                    t.extractall(target, filter="data")
+                except TypeError:  # Python < 3.12 without the backport
+                    t.extractall(target)
+        else:
+            import zipfile  # noqa: PLC0415
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(target)
+
+    def _install_engine(self, flavor: str = "stock") -> None:
+        target = self.engine_dir(flavor)
+        try:
+            rel = self._release_for(flavor)
+            asset, cudart = self._matching_assets(rel.get("assets", []))
             if not asset:
                 raise RuntimeError(
                     "No usable build for this OS in the latest llama.cpp "
                     "release.")
-            ENGINE_DIR.mkdir(parents=True, exist_ok=True)
-            for i, a in enumerate([asset] + ([cudart] if cudart else [])):
-                self.engine_install = {
-                    "stage": f"downloading {a['name']}", "error": None}
-                dest = ENGINE_DIR / a["name"]
+            target.mkdir(parents=True, exist_ok=True)
+            for a in [asset] + ([cudart] if cudart else []):
+                self._progress(flavor, {
+                    "stage": f"downloading {a['name']}", "error": None})
+                dest = target / a["name"]
                 urllib.request.urlretrieve(a["browser_download_url"], dest)
-                self.engine_install = {"stage": f"extracting {a['name']}",
-                                       "error": None}
-                import zipfile  # noqa: PLC0415
-                with zipfile.ZipFile(dest) as z:
-                    z.extractall(ENGINE_DIR)
+                self._progress(flavor, {"stage": f"extracting {a['name']}",
+                                        "error": None})
+                self._extract(dest, target)
                 dest.unlink()
-            # Some releases nest binaries under build/bin — flatten.
-            if not self.engine_installed:
-                for sub in ("build/bin", "bin"):
-                    cand = ENGINE_DIR / sub
-                    if (cand / _EXE).exists():
-                        for f in cand.iterdir():
-                            f.rename(ENGINE_DIR / f.name)
-                        break
-            if not self.engine_installed:
+            # Releases nest the binaries a folder down (build/bin, or the
+            # tag-named folder the fork's tarballs unpack to) — flatten.
+            if not (target / _EXE).exists():
+                nested = next(target.rglob(_EXE), None)
+                if nested is not None:
+                    for f in nested.parent.iterdir():
+                        f.rename(target / f.name)
+            if not (target / _EXE).exists():
                 raise RuntimeError(f"{_EXE} not found after extraction.")
             if not hostos.IS_WSL:
                 # zipfile drops the exec bit.
-                for f in ENGINE_DIR.iterdir():
+                for f in target.iterdir():
                     if f.is_file() and (f.name.startswith("llama")
                                         or f.suffix == ".so"):
                         f.chmod(f.stat().st_mode | 0o755)
-            self.engine_install = None
-            log.info("llama.cpp engine installed (%s)", rel.get("tag_name"))
+            self._progress(flavor, None)
+            log.info("llama.cpp engine installed (%s, %s)", flavor,
+                     rel.get("tag_name"))
         except Exception as exc:  # noqa: BLE001
-            log.exception("engine install failed")
-            self.engine_install = {"stage": "failed", "error": str(exc)[:200]}
+            log.exception("engine install failed (%s)", flavor)
+            self._progress(flavor, {"stage": "failed", "error": str(exc)[:200]})
 
     # -- state ------------------------------------------------------------
 
@@ -210,19 +319,28 @@ class LlamaCppManager:
     def installed_models(self) -> list[dict]:
         if not GGUF_DIR.is_dir():
             return []
+        # Projectors are companions, not models: they ride along with the
+        # weights they belong to instead of appearing as something to load.
         return [{"file": p.name,
-                 "size_gb": round(p.stat().st_size / 1e9, 1)}
-                for p in sorted(GGUF_DIR.glob("*.gguf"))]
+                 "size_gb": round(p.stat().st_size / 1e9, 1),
+                 "engine": "prism" if needs_prism(p.name) else "stock",
+                 "mmproj": mmproj_for(p.name) is not None}
+                for p in sorted(GGUF_DIR.glob("*.gguf"))
+                if "-mmproj-" not in p.name]
 
     def status(self) -> dict:
         alive = self.healthy(3, max_age=5)
         return {
             "engine_installed": self.engine_installed,
             "engine_install": self.engine_install,
+            "prism_engine_installed": self.prism_engine_installed,
+            "prism_engine_install": self.prism_engine_install,
+            "engine_flavor": self.engine_flavor if alive else None,
             "running": alive,
             "model": self.model_file if alive else None,
             "port": PORT,
             "models": self.installed_models(),
+            "picks": GGUF_PICKS,
             "sharp_template": {
                 "downloaded": SHARP_TEMPLATE.exists(),
                 "active": bool(getattr(self, "sharp_active", False)
@@ -254,12 +372,17 @@ class LlamaCppManager:
     def start(self, model_file: str, context: int | None = None,
               wait_healthy_s: float = 240.0) -> None:
         with self._lock:
-            if not self.engine_installed:
-                self.install_engine_async()
+            name = Path(model_file).name
+            flavor = "prism" if needs_prism(name) else "stock"
+            if not self.engine_ready(flavor):
+                self.install_engine_async(flavor)
                 raise RuntimeError(
+                    "PrismML's llama.cpp fork is downloading — this ternary "
+                    "model needs it; watch the Models page and try again "
+                    "when it lands." if flavor == "prism" else
                     "The llama.cpp engine is downloading — watch the "
                     "Models page and try again when it lands.")
-            name = Path(model_file).name
+            engine_dir = self.engine_dir(flavor)
             if not (GGUF_DIR / name).exists():
                 raise RuntimeError(f"No {name} in the model library.")
             if context is None:
@@ -267,13 +390,18 @@ class LlamaCppManager:
             self.context = int(context)
             self._kill_instances()
             self._probe = None
-            args = [str(ENGINE_DIR / _EXE),
+            args = [str(engine_dir / _EXE),
                     "-m", _path_arg(GGUF_DIR / name),
                     "--host", "127.0.0.1", "--port", str(PORT),
                     "-ngl", "999", "-c", str(context), "--no-webui",
                     # Mirror the Mac's LlamaArguments: --jinja is what
                     # makes tool calls work without per-model cases.
                     "--jinja"]
+            mmproj = mmproj_for(name)
+            if mmproj is not None:
+                # Image input for the 27B Bonsai family; loaded lazily by
+                # llama-server, so text-only chat pays nothing for it.
+                args += ["--mmproj", _path_arg(mmproj)]
             self.sharp_active = False
             if (sharp_suits(name) and SHARP_TEMPLATE.exists()
                     and os.environ.get("SILICON_NODE_SHARP_TEMPLATE",
@@ -287,14 +415,16 @@ class LlamaCppManager:
             if not hostos.IS_WSL:
                 # The official Linux builds ship their .so files beside
                 # the binary; make sure the loader finds them.
-                env["LD_LIBRARY_PATH"] = (str(ENGINE_DIR) + ":"
+                env["LD_LIBRARY_PATH"] = (str(engine_dir) + ":"
                                           + env.get("LD_LIBRARY_PATH", ""))
+            self._logfile = engine_dir / "llama-server.log"
             logfh = open(self._logfile, "ab")  # noqa: SIM115
             self._proc = subprocess.Popen(
                 args, stdout=logfh, stderr=subprocess.STDOUT,
-                cwd=str(ENGINE_DIR), env=env)
+                cwd=str(engine_dir), env=env)
             logfh.close()
             self.model_file = name
+            self.engine_flavor = flavor
             self._started_at = time.time()
         deadline = time.time() + wait_healthy_s
         while time.time() < deadline:

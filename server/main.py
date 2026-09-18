@@ -962,12 +962,15 @@ def models_inventory():
 
     from .llamacpp import GGUF_DIR_WIN  # noqa: PLC0415
     for entry in llama.get("models", []):
+        prism = entry.get("engine") == "prism"
         models.append({
             "id": entry["file"], "name": entry["file"],
-            "capability": "llm-gguf", "engine": "llama.cpp",
+            "capability": "llm-gguf",
+            "engine": "llama.cpp (PrismML fork)" if prism else "llama.cpp",
             "repo": GGUF_DIR_WIN,
             "installed": True,
-            "ready": llama.get("engine_installed", False),
+            "ready": llama.get("prism_engine_installed" if prism
+                               else "engine_installed", False),
             "loaded": bool(llama.get("running")
                            and llama.get("model") == entry["file"]),
             "size_gb": entry.get("size_gb"),
@@ -1526,13 +1529,19 @@ def gguf_status():
 
 @app.post("/v1/gguf/download")
 async def gguf_download(request: Request):
-    from .llamacpp import GGUF_DL, LLAMACPP
+    from .llamacpp import GGUF_DL, LLAMACPP, needs_prism
     body = await request.json()
     if not body.get("repo") or not body.get("file"):
         raise HTTPException(status_code=400,
                             detail="repo and file are required.")
-    LLAMACPP.install_engine_async()  # fetch the engine alongside the model
+    # Fetch the engine alongside the model — PrismML's fork for its
+    # ternary packings, the stock build for everything else.
+    LLAMACPP.install_engine_async(
+        "prism" if needs_prism(body["file"]) else "stock")
     GGUF_DL.start(body["repo"], body["file"])
+    if body.get("mmproj"):
+        # The vision projector that belongs with the weights (27B Bonsai).
+        GGUF_DL.start(body["repo"], body["mmproj"])
     return {"ok": True}
 
 

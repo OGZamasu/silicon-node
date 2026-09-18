@@ -150,3 +150,14 @@ Windows side: `install.ps1` adds the tray app to the Start menu and
 startup; `setup-lan-exposure.ps1` (run as admin) adds the LAN port proxy,
 firewall rule, and WSL keepalive if you want LAN access — with the swarm
 token set first, per [SECURITY.md](../SECURITY.md).
+
+## Bonsai 2 27B on the GGUF lane
+
+PrismML's Ternary Bonsai 2 27B (`prism-ml/Ternary-Bonsai-2-27B-gguf`, the
+`PTQ1_0` file plus its `mmproj-Q8_0` projector) is a one-click pick on the
+dashboard's Models page. Its packing is refused by stock llama.cpp, so the
+node fetches PrismML's fork (`PrismML-Eng/llama.cpp`, the Windows CUDA 12.4
+build plus its cudart) into `runtime/llamacpp-prism` beside the stock engine
+the first time such a file is downloaded, and serves those files from it.
+`SILICON_NODE_LLAMACPP_PRISM_DIR` moves that folder. Everything else keeps
+using the stock engine.
