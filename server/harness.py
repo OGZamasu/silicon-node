@@ -22,7 +22,6 @@ import threading
 import time
 from pathlib import Path
 
-from . import config
 from .llm import LLM, PORT as LLM_PORT
 
 log = logging.getLogger("silicon-node.harness")
@@ -32,7 +31,7 @@ PROVIDER_ID = "silicon-local"
 API_KEY_VAR = "SILICON_LOCAL_API_KEY"
 WEB_PORT = int(os.environ.get("SILICON_NODE_DSH_PORT", "8090"))
 
-from . import hostos
+from . import hostos  # noqa: E402 (after the constants it reads)
 
 _RUNTIME = Path(os.environ.get(
     "SILICON_NODE_RUNTIME",

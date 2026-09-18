@@ -4,10 +4,28 @@
 
 const { app, BrowserWindow, Menu, Tray, nativeImage, shell } =
   require("electron");
+const fs = require("fs");
 const path = require("path");
 const ICON = "F:/Windows Silicon Optimizer/silicon-node/server/ui/icon.png";
 
-const UI = "http://127.0.0.1:8790/ui";
+const NODE = "http://127.0.0.1:8790";
+const UI = NODE + "/ui";
+// This shell runs on Windows, so everything it sends reaches the WSL
+// service through the port proxy — never from loopback — and needs the
+// swarm token like any other off-box caller (SECURITY.md). It is read
+// from the same file the PySide tray uses; if that fails the page is
+// opened bare and asks for the token itself.
+const SWARM_JSON = "\\\\wsl$\\SiliconNode\\opt\\silicon\\swarm.json";
+function swarmToken() {
+  try {
+    const t = JSON.parse(fs.readFileSync(SWARM_JSON, "utf8")).swarm_token;
+    return typeof t === "string" ? t.trim() : "";
+  } catch { return ""; }
+}
+function authed(url) {
+  const t = swarmToken();
+  return fetch(url, t ? { headers: { Authorization: `Bearer ${t}` } } : {});
+}
 const HUB = "https://memories.zamasu.dev/p/silicon-node";
 const COLORS = { idle: "#34c759", job: "#ff9500", llm: "#0a84ff",
                  down: "#ff453a" };
@@ -51,7 +69,8 @@ function createWindow() {
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true },
   });
-  win.loadURL(UI);
+  const t = swarmToken();
+  win.loadURL(t ? `${UI}#token=${encodeURIComponent(t)}` : UI);
   // External links go to the real browser, not new app windows.
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (!url.startsWith("http://127.0.0.1") &&
@@ -69,9 +88,9 @@ function createWindow() {
 async function pollStatus() {
   try {
     const [health, node, llm] = await Promise.all([
-      fetch("http://127.0.0.1:8790/health").then(r => r.json()),
-      fetch("http://127.0.0.1:8790/v1/node").then(r => r.json()),
-      fetch("http://127.0.0.1:8790/v1/llm").then(r => r.json()),
+      fetch(`${NODE}/health`).then(r => r.json()),
+      authed(`${NODE}/v1/node`).then(r => r.json()),
+      authed(`${NODE}/v1/llm`).then(r => r.json()),
     ]);
     const free = node.metrics?.headroom_gb ?? "?";
     if ((health.queue_depth ?? 0) > 0)

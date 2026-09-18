@@ -24,10 +24,16 @@ enforces the same rule on its side.
 - A **wrong token is always rejected**, even before you turn on strict
   enforcement — so a typo shows up immediately, not in an incident.
 - **Every request from another machine carries a token.** Requests
-  arriving directly on loopback are the owner's own dashboard and tray
-  GUI and stay open; a request carrying any forwarding header is treated
-  as remote even when its source address is loopback, and needs a bearer
-  token.
+  arriving directly on loopback stay open; a request carrying any
+  forwarding header is treated as remote even when its source address is
+  loopback, and needs a bearer token.
+- **The owner's own dashboard and tray carry the swarm token too.** On
+  the WSL node they are Windows programs, so their traffic comes through
+  the port proxy and never looks like loopback. The tray reads the token
+  from `swarm.json` and opens the dashboard as `/ui#token=…`; the page
+  keeps it in the browser's localStorage and scrubs it from the URL. A
+  dashboard opened by hand (another PC, or the Mac's browser on the
+  tailnet) asks for the token once, on its first 401.
 - **Members are not operators.** A paired client token submits jobs and
   chats. Changing abilities, uninstalling models, starting downloads,
   pausing serving, stopping engines and revealing folders on the host
@@ -41,6 +47,24 @@ enforces the same rule on its side.
 
 Turn on strict mode (loopback callers must carry a token too, which
 means the local dashboard needs one) with `SILICON_NODE_REQUIRE_AUTH=1`.
+
+## Limits on what a caller can spend
+
+A member with a valid token can still cost the node its disk, so two
+budgets are enforced rather than documented:
+
+| Setting | Default | What it means |
+|---|---|---|
+| `SILICON_NODE_MAX_UPLOAD_MB` | 2048 | Bodies above this are refused with 413 — on the declared `Content-Length` first, then while streaming, so nothing oversized lands on disk |
+| `SILICON_NODE_RETAIN_JOBS` | 200 | The newest finished jobs, kept regardless of age |
+| `SILICON_NODE_RETAIN_DAYS` | 14 | A finished job outside the newest `RETAIN_JOBS` is deleted — inputs, receipt and rendered artifacts — once it is older than this |
+
+A finished job goes only when *both* limits say so. **A zero in either
+setting turns retention off** — nothing is ever deleted — rather than
+meaning "keep nothing". Retention runs at startup and after every
+finished job; `POST /v1/jobs/prune` (operator only) reclaims space
+immediately and takes the same `keep` / `max_age_days` with the same
+zero-means-off rule. Queued, running and held jobs are never pruned.
 
 ## Checking it
 

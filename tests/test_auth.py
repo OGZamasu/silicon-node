@@ -16,6 +16,11 @@ from server.main import _role, app
 
 LOCAL = ("127.0.0.1", 51234)
 REMOTE = ("192.168.1.50", 51234)
+# On the WSL2 node nothing the owner runs on Windows — the tray, a browser
+# at 127.0.0.1:8790/ui — reaches the service from loopback: it all comes
+# through the Windows port proxy and arrives from the NAT gateway
+# (hostos.proxy_ip). To the auth layer that is just another remote host.
+PROXY = ("172.28.0.1", 51234)
 
 # Every route a member must not reach. Bodies are deliberately invalid or
 # name nothing real, so an operator's request is refused by the route
@@ -44,9 +49,28 @@ def call(c: TestClient, method: str, path: str, body, token: str | None):
 # --- who may talk to the node at all -------------------------------------
 
 def test_loopback_needs_no_token(tokens):
-    """The node's own dashboard sends no header and must keep working."""
+    """A caller on the box itself — a browser inside a native-Linux node,
+    curl in the distro — sends no header and keeps working."""
     r = client(LOCAL).get("/v1/capabilities")
     assert r.status_code == 200
+
+
+def test_the_owner_behind_the_windows_proxy_needs_the_swarm_token(tokens):
+    """The WSL owner's own dashboard and tray are not loopback callers:
+    headerless they are refused, and they carry the swarm token instead
+    (the tray reads it from swarm.json; the page asks once)."""
+    assert client(PROXY).get("/v1/node").status_code == 401
+    r = call(client(PROXY), "get", "/v1/node", None, tokens["swarm"])
+    assert r.status_code == 200
+    assert r.json()["name"] == config.SERVER_NAME
+
+
+def test_the_dashboard_page_itself_is_served_without_a_token(tokens):
+    """/ui is outside /v1/: the page must load so it can ask for the
+    token; only its API calls are gated."""
+    r = client(PROXY).get("/ui")
+    assert r.status_code == 200
+    assert "nodeToken" in r.text
 
 
 def test_remote_without_token_is_rejected(tokens):

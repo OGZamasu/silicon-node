@@ -21,7 +21,7 @@ from pathlib import Path
 
 log = logging.getLogger("silicon-node.llamacpp")
 
-from . import hostos
+from . import hostos  # noqa: E402 (after the logger it configures)
 
 PORT = int(os.environ.get("SILICON_NODE_GGUF_PORT", "8082"))
 ENGINE_DIR = Path(os.environ.get(
@@ -42,7 +42,7 @@ _EXE = "llama-server.exe" if hostos.IS_WSL else "llama-server"
 
 
 def _path_arg(p: Path) -> str:
-    """A path as the ENGINE must see it (F:\... through interop on WSL,
+    r"""A path as the ENGINE must see it (F:\... through interop on WSL,
     the POSIX path itself on Linux)."""
     return hostos.win_path(p) if hostos.IS_WSL else str(p)
 

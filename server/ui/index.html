@@ -578,9 +578,68 @@ function go(p) {
 }
 function route() { go((location.hash || "#dashboard").slice(1)); }
 
+/* ---------- auth ----------
+   Every /v1/ call from off this machine needs a bearer token (SECURITY.md)
+   — and on the WSL node even the owner's own browser and tray arrive
+   through the Windows port proxy, so this page always sends one when it
+   has one. The tray hands the swarm token over as #token=… (or ?token=…)
+   in the URL; a browser opened by hand is asked once, on the first 401.
+   Either way it is kept in localStorage and scrubbed from the URL. */
+let TOKEN = "";
+try { TOKEN = localStorage.getItem("nodeToken") || ""; } catch {}
+function setToken(t) {
+  TOKEN = t;
+  try { localStorage.setItem("nodeToken", t); } catch {}
+}
+(function takeTokenFromUrl() {
+  const q = new URLSearchParams(location.search).get("token");
+  const h = /^#token=(.+)$/.exec(location.hash);
+  const t = q || (h && decodeURIComponent(h[1]));
+  if (!t) return;
+  setToken(t);
+  history.replaceState(null, "", location.pathname +
+    (h ? "#dashboard" : location.hash));
+})();
+let tokenAsked = false;
+
+/* Artifacts under /v1/files are shown by <img>, <video>, download links
+   and the mesh viewer as plain browser loads, which cannot carry the
+   header. With a token they are fetched here and handed over as object
+   URLs, each owned by the element whose content they fill so the previous
+   batch is revoked when it is replaced. Without a token (a loopback
+   dashboard on a native-Linux node) the direct path is used unchanged. */
+const BLOBS = new WeakMap();          // owner element -> object URLs held
+function dropBlobs(owner) {
+  (BLOBS.get(owner) || []).forEach(url => URL.revokeObjectURL(url));
+  BLOBS.delete(owner);
+}
+async function fileUrl(u, owner) {
+  if (!TOKEN) return u;
+  const r = await fetch(u, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  if (!r.ok) throw new Error((await r.text()).slice(0, 200));
+  const url = URL.createObjectURL(await r.blob());
+  if (owner) BLOBS.set(owner, (BLOBS.get(owner) || []).concat(url));
+  return url;
+}
+function loadInto(el, u, owner) {     // <img>/<video> src, direct or blob
+  if (!TOKEN) { el.src = u; return; }
+  fileUrl(u, owner || el).then(url => { el.src = url; })
+    .catch(e => { el.alt = String(e).slice(0, 80); });
+}
+
 /* ---------- polling ---------- */
 async function j(url, opts) {
-  const r = await fetch(url, opts);
+  const o = Object.assign({}, opts);
+  if (TOKEN)
+    o.headers = Object.assign({}, o.headers,
+                              { Authorization: `Bearer ${TOKEN}` });
+  const r = await fetch(url, o);
+  if (r.status === 401 && !tokenAsked && url.startsWith("/v1/")) {
+    tokenAsked = true;
+    const t = prompt("This node needs its swarm token to be used from " +
+                     "here. Paste it (it is remembered in this browser):");
+    if (t && t.trim()) { setToken(t.trim()); return j(url, opts); }
+  }
   if (!r.ok) throw new Error((await r.text()).slice(0, 200));
   return r.json();
 }
@@ -1219,10 +1278,14 @@ async function imgPoll() {
     const d = await j(`/v1/jobs/${IMG_JOB}`);
     if (d.status === "done") {
       $("#img-status").textContent = `done in ${hms(d.elapsed_s || 0)}`;
-      $("#img-out").innerHTML = (d.result_urls || []).map(u =>
-        `<img src="${u}" style="max-width:100%; border-radius:10px;
+      const out = $("#img-out");
+      dropBlobs(out);
+      out.innerHTML = (d.result_urls || []).map(u =>
+        `<img data-u="${u}" style="max-width:100%; border-radius:10px;
            margin-top:14px; cursor:zoom-in" onclick="preview('${u}')">`)
         .join("");
+      out.querySelectorAll("img[data-u]").forEach(img =>
+        loadInto(img, img.dataset.u, out));
       $("#img-go").disabled = false; IMG_JOB = null; return;
     }
     if (d.status === "failed") {
@@ -1602,18 +1665,22 @@ function renderSettings() {
 function closePreview() {
   $("#preview").style.display = "none";
   $("#pv-body").innerHTML = "";
+  dropBlobs($("#pv-body"));
 }
 async function preview(u) {
   const ext = u.split(".").pop().toLowerCase();
   const body = $("#pv-body");
+  dropBlobs(body);
   $("#pv-title").textContent = u.split("/").pop();
   $("#preview").style.display = "flex";
   if (["mp4", "webm", "mov"].includes(ext)) {
-    body.innerHTML = `<video src="${u}" controls autoplay loop
+    body.innerHTML = `<video controls autoplay loop
       style="max-width:78vw; max-height:70vh; border-radius:8px"></video>`;
+    loadInto(body.firstElementChild, u, body);
   } else if (["png", "jpg", "jpeg", "webp"].includes(ext)) {
-    body.innerHTML = `<img src="${u}" style="max-width:78vw;
+    body.innerHTML = `<img style="max-width:78vw;
       max-height:70vh; border-radius:8px">`;
+    loadInto(body.firstElementChild, u, body);
   } else if (["glb", "obj"].includes(ext)) {
     body.innerHTML = `<div class="empty"><span class="spin"></span>loading viewer…</div>`;
     try {
@@ -1643,10 +1710,11 @@ async function preview(u) {
         controls.update();
         scene.add(obj);
       };
+      const src = await fileUrl(u, body);
       if (ext === "glb")
-        new loaderMod.GLTFLoader().load(u, g => fit(g.scene));
+        new loaderMod.GLTFLoader().load(src, g => fit(g.scene));
       else
-        new loaderMod.OBJLoader().load(u, o => {
+        new loaderMod.OBJLoader().load(src, o => {
           o.traverse(ch => { if (ch.isMesh) ch.material =
             new THREE.MeshStandardMaterial({ color: 0x9fb8a6,
               flatShading: false }); });
@@ -1665,10 +1733,15 @@ async function preview(u) {
     }
   }
 }
-function dl(u) {
+async function dl(u) {
+  let href;
+  try { href = await fileUrl(u); }
+  catch (e) { alert(String(e).slice(0, 220)); return; }
   const a = document.createElement("a");
-  a.href = u; a.download = "";
+  a.href = href; a.download = u.split("/").pop();
   document.body.appendChild(a); a.click(); a.remove();
+  // A blob URL must outlive the click that starts the download.
+  if (href !== u) setTimeout(() => URL.revokeObjectURL(href), 60000);
 }
 function setTheme(v) {
   localStorage.setItem("theme", v);

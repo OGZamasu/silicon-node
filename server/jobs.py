@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -153,6 +154,10 @@ class JobStore:
                 self._jobs[job.job_id] = job
             except Exception:
                 log.exception("could not reload job from %s", status_file)
+        # Startup is the one moment a long-idle node is guaranteed to run
+        # code, so it is where a disk that filled while nobody looked gets
+        # its space back.
+        self.prune()
 
     # -- registry ---------------------------------------------------------
 
@@ -188,9 +193,30 @@ class JobStore:
                  {k: v for k, v in job.params.items()
                   if not k.endswith("_path")})
 
+    def abandon(self, job: Job, reason: str) -> None:
+        """A deferred job whose input never reached the disk (upload
+        refused, body undecodable). Nothing will ever enqueue it, so it
+        must not sit in the table as queued forever — fail it with the
+        reason the submitter was given, and retention will sweep it."""
+        with self._cv:
+            if job.state != "queued" or job.job_id in self._pending:
+                return
+            job.state = "failed"
+            job.error = reason
+            job.finished_at = time.time()
+        job.save()
+
     def get(self, job_id: str) -> Optional[Job]:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def snapshot(self) -> list[Job]:
+        """Every job the store knows, copied under the lock. Handlers that
+        walk the table must use this: the worker adds to it and the
+        retention sweep pops from it on other threads, and iterating the
+        live dict while that happens raises mid-request."""
+        with self._lock:
+            return list(self._jobs.values())
 
     def queue_depth(self) -> int:
         with self._lock:
@@ -260,6 +286,66 @@ class JobStore:
                     running.cancel_requested = True
                     n += 1
         return n
+
+    # -- retention --------------------------------------------------------
+
+    def prune(self, keep: Optional[int] = None,
+              max_age_days: Optional[float] = None) -> dict[str, Any]:
+        """Delete the oldest finished jobs, with their inputs and artifacts.
+
+        Only done/failed jobs are candidates: a queued or running job is
+        someone's render in flight. A finished job goes only when it is
+        BOTH outside the newest `keep` AND older than `max_age_days`, so
+        a node idle for a month still has its last results to show. A
+        zero (or less) in either limit means retention is off: nothing is
+        deleted. Returns what went — a silent deleter of someone's renders
+        is not something to ship.
+        """
+        keep = config.RETAIN_JOBS if keep is None else keep
+        max_age_days = (config.RETAIN_DAYS if max_age_days is None
+                        else max_age_days)
+
+        with self._lock:
+            finished = [j for j in self._jobs.values()
+                        if j.state in ("done", "failed")]
+        if keep <= 0 or max_age_days <= 0:
+            return {"removed": [], "freed_bytes": 0, "kept": len(finished)}
+        cutoff = time.time() - max_age_days * 86400
+        # Oldest first, so "keep the newest N" is a tail slice.
+        finished.sort(key=lambda j: j.finished_at or j.created_at or 0.0)
+        doomed = [j for j in finished[:-keep]
+                  if (j.finished_at or j.created_at or 0.0) < cutoff]
+
+        removed, freed = [], 0
+        for job in doomed:
+            freed += self._delete(job)
+            removed.append(job.job_id)
+        if removed:
+            log.info("pruned %d finished job(s), freed %.1f MB",
+                     len(removed), freed / 1e6)
+        return {"removed": removed, "freed_bytes": freed,
+                "kept": len(finished) - len(removed)}
+
+    def _delete(self, job: Job) -> int:
+        """Remove one finished job's directory and published artifacts."""
+        freed = 0
+        for name in job.result_files:
+            path = config.FILES_DIR / name
+            try:
+                freed += path.stat().st_size
+                path.unlink()
+            except OSError:
+                pass
+        for path in job.dir.rglob("*"):
+            try:
+                if path.is_file():
+                    freed += path.stat().st_size
+            except OSError:
+                pass
+        shutil.rmtree(job.dir, ignore_errors=True)
+        with self._lock:
+            self._jobs.pop(job.job_id, None)
+        return freed
 
     def retry(self, job_id: str) -> Optional[Job]:
         source = self.get(job_id)
@@ -371,6 +457,12 @@ class JobStore:
                 os._exit(config.OOM_EXIT_CODE)
         finally:
             self._current = None
+            # Every finish is a chance to keep the disk inside its budget,
+            # so retention does not depend on the node ever restarting.
+            try:
+                self.prune()
+            except Exception:  # noqa: BLE001
+                log.exception("pruning after job %s failed", job.job_id)
             LLM.schedule_restore(
                 _pipeline.ENGINE.unload,
                 is_busy=lambda: (len(self._pending) > 0

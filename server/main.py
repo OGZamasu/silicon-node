@@ -15,6 +15,7 @@ Phase 2:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
 import subprocess
@@ -25,7 +26,7 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from . import config, pipeline
+from . import config, pipeline, uploads
 from .jobs import STORE
 from .llm import DOWNLOADS, LLM, MODEL_ID as LLM_MODEL_ID, PORT as LLM_PORT
 
@@ -72,6 +73,13 @@ async def bearer_auth(request: Request, call_next):
                 return PlainTextResponse(
                     "This Silicon node requires a bearer token. Send "
                     "'Authorization: Bearer <token>'.", status_code=401)
+        # Body size is checked here rather than in each handler so no
+        # submit route can be added without one.
+        try:
+            uploads.check_declared_size(
+                request.headers.get("content-length"))
+        except HTTPException as exc:
+            return PlainTextResponse(str(exc.detail), status_code=413)
     return await call_next(request)
 
 
@@ -217,6 +225,21 @@ def _submitter(request: Request, cap: Optional[str] = None) -> dict:
             "user_agent": request.headers.get("user-agent", "")[:120]}
 
 
+@contextlib.contextmanager
+def _staging(job):
+    """The window between STORE.submit(defer=True) and STORE.enqueue():
+    the job exists but its input is still being written. If that write
+    is refused (413 over the upload ceiling, undecodable base64, an empty
+    file) the submitter gets the error — and the job must not stay queued
+    forever, because nothing will ever enqueue it."""
+    try:
+        yield
+    except BaseException as exc:
+        detail = getattr(exc, "detail", None) or str(exc) or "input rejected"
+        STORE.abandon(job, f"Input rejected: {detail}")
+        raise
+
+
 @app.post("/v1/image-to-mesh")
 async def image_to_mesh(
     request: Request,
@@ -240,12 +263,13 @@ async def image_to_mesh(
     job.dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(image.filename or "input.png").suffix or ".png"
     image_path = job.dir / f"input{suffix}"
-    with image_path.open("wb") as f:
-        shutil.copyfileobj(image.file, f)
-    if image_path.stat().st_size == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="The uploaded image is empty. Please send a PNG or JPEG.")
+    with _staging(job):
+        await uploads.save_upload(image, image_path)
+        if image_path.stat().st_size == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded image is empty. Please send a PNG or "
+                       "JPEG.")
     job.params["image_path"] = str(image_path)
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -254,7 +278,7 @@ async def image_to_mesh(
 @app.get("/v1/jobs")
 def jobs_list():
     """Recent jobs, newest first (for the dashboard)."""
-    jobs = sorted(STORE._jobs.values(), key=lambda j: j.created_at,
+    jobs = sorted(STORE.snapshot(), key=lambda j: j.created_at,
                   reverse=True)[:20]
     return [{**j.to_api(), "capability": j.capability, "state": j.state,
              "created_at": j.created_at, "started_at": j.started_at,
@@ -314,6 +338,35 @@ async def queue_cancel(request: Request):
         raise HTTPException(status_code=400,
                             detail='scope must be "pending" or "all".')
     return {"cancelled": STORE.cancel_queue(scope)}
+
+
+@app.post("/v1/jobs/prune")
+async def jobs_prune(request: Request):
+    """Reclaim disk now, rather than waiting for the next finished job.
+
+    Retention runs on its own (at startup and after every job), so this is
+    for the case where the disk is full *today*: the dashboard's Free space
+    button, and `keep`/`max_age_days` for a one-off deeper sweep. Both
+    limits must agree before a job goes, and a zero in either means no
+    sweep at all — the same rule as the SILICON_NODE_RETAIN_* settings.
+    """
+    _require_operator(request, "Deleting finished jobs and their artifacts")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    keep = body.get("keep")
+    days = body.get("max_age_days")
+    try:
+        keep_n = None if keep is None else max(0, int(keep))
+        max_age = None if days is None else max(0.0, float(days))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="keep must be a whole number of jobs and max_age_days "
+                   "a number of days.") from None
+    return await asyncio.to_thread(STORE.prune, keep=keep_n,
+                                   max_age_days=max_age)
 
 
 @app.post("/v1/jobs/{job_id}/{action}")
@@ -499,7 +552,7 @@ def capability_list() -> list[dict]:
                        "present yet."),
         },
     ]
-    from .capsettings import CAPS, DEFAULTS  # noqa: PLC0415
+    from .capsettings import CAPS  # noqa: PLC0415
     for c in caps:
         cid = c["id"]
         if cid in _CAP_DESCRIPTIONS:
@@ -565,7 +618,7 @@ def _talkinghead_ready() -> bool:
 def _measured(cap: str, field: str):
     """Aggregate receipts of finished jobs; None until first measurement."""
     samples = []
-    for job in list(STORE._jobs.values()):
+    for job in STORE.snapshot():
         if job.capability != cap or job.state != "done":
             continue
         if field == "typical_seconds" and job.started_at and job.finished_at:
@@ -1076,8 +1129,8 @@ async def retopologize_upload(
     job.submitted_by = _submitter(request, "retopologize")
     job.dir.mkdir(parents=True, exist_ok=True)
     mesh_path = job.dir / f"input{suffix}"
-    with mesh_path.open("wb") as f:
-        shutil.copyfileobj(mesh.file, f)
+    with _staging(job):
+        await uploads.save_upload(mesh, mesh_path)
     job.params["mesh_path"] = str(mesh_path)
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -1108,7 +1161,6 @@ async def chat_completions_proxy(request: Request):
     which WSL sockets cannot reach — interop curl bridges it, streaming
     included. Clients that should be counted point at :8790/v1 instead
     of the engine port; the engine ports keep working unchanged."""
-    import os  # noqa: PLC0415
     import uuid  # noqa: PLC0415
     from .llamacpp import LLAMACPP, PORT as GGUF_PORT  # noqa: PLC0415
     if LLM.running:
@@ -1325,14 +1377,16 @@ async def text_to_video_submit(request: Request):
     job.submitted_by = _submitter(request, "text-to-video")
     job.dir.mkdir(parents=True, exist_ok=True)
     if body.get("image_b64"):
-        try:
-            img = base64.b64decode(body["image_b64"])
-        except ValueError:
-            raise HTTPException(status_code=400,
-                                detail="image_b64 is not valid base64."
-                                ) from None
-        suffix = Path(body.get("image_name", "start.png")).suffix or ".png"
-        (job.dir / f"start{suffix}").write_bytes(img)
+        with _staging(job):
+            try:
+                img = base64.b64decode(body["image_b64"])
+            except ValueError:
+                raise HTTPException(status_code=400,
+                                    detail="image_b64 is not valid base64."
+                                    ) from None
+            suffix = (Path(body.get("image_name", "start.png")).suffix
+                      or ".png")
+            await uploads.write_bytes(job.dir / f"start{suffix}", img)
         job.params["image_path"] = str(job.dir / f"start{suffix}")
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -1411,7 +1465,7 @@ async def store_install(request: Request):
     refusal = modelstore.disk_refusal(entry)
     if refusal:
         raise HTTPException(status_code=507, detail=refusal)
-    for j in STORE._jobs.values():
+    for j in STORE.snapshot():
         if (j.capability == "store-install" and j.state in
                 ("queued", "running") and j.params.get("model_id") == mid):
             return {"ok": True, "job_id": j.job_id,
@@ -1435,7 +1489,7 @@ def store_delete(model_id: str, request: Request):
     if not modelstore._installed(entry):
         return {"ok": True, "already_absent": True,
                 "detail": f"{entry['name']} is not installed."}
-    for j in STORE._jobs.values():
+    for j in STORE.snapshot():
         if j.state not in ("queued", "running"):
             continue
         if j.capability == entry["capability"]:
@@ -1481,8 +1535,9 @@ async def portrait_animate_submit(request: Request):
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     drv_suffix = Path(body.get("driving_name", "d.mp4")).suffix or ".mp4"
-    (job.dir / f"portrait{img_suffix}").write_bytes(image)
-    (job.dir / f"driving{drv_suffix}").write_bytes(driving)
+    with _staging(job):
+        await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
+        await uploads.write_bytes(job.dir / f"driving{drv_suffix}", driving)
     job.params["image_path"] = str(job.dir / f"portrait{img_suffix}")
     job.params["driving_path"] = str(job.dir / f"driving{drv_suffix}")
     STORE.enqueue(job)
@@ -1515,8 +1570,9 @@ async def talking_head_submit(request: Request):
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     aud_suffix = Path(body.get("audio_name", "a.wav")).suffix or ".wav"
-    (job.dir / f"portrait{img_suffix}").write_bytes(image)
-    (job.dir / f"speech{aud_suffix}").write_bytes(audio)
+    with _staging(job):
+        await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
+        await uploads.write_bytes(job.dir / f"speech{aud_suffix}", audio)
     job.params["image_path"] = str(job.dir / f"portrait{img_suffix}")
     job.params["audio_path"] = str(job.dir / f"speech{aud_suffix}")
     STORE.enqueue(job)
