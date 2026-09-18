@@ -281,7 +281,15 @@ a.dl:hover { text-decoration: underline; }
   <p class="lede">Every number below is measured on this machine, not
   promised.</p>
   <div class="offline">Service unreachable — the SiliconNode distro or
-    <code>silicon-node.service</code> is down. <span id="offline-why"></span></div>
+    <code>silicon-node.service</code> is down. <span id="offline-why"></span>
+    <form id="token-form" style="display:none; margin-top:10px; gap:8px"
+      onsubmit="return useToken(event)">
+      <input id="token-input" type="password" autocomplete="off"
+        placeholder="swarm token — swarm_token in /opt/silicon/swarm.json"
+        style="min-width:300px">
+      <button class="primary" type="submit">Use token</button>
+      <span class="sub">Kept in this browser; the node refuses calls without it.</span>
+    </form></div>
 
   <div class="cols">
     <div class="col">
@@ -583,7 +591,9 @@ function route() { go((location.hash || "#dashboard").slice(1)); }
    — and on the WSL node even the owner's own browser and tray arrive
    through the Windows port proxy, so this page always sends one when it
    has one. The tray hands the swarm token over as #token=… (or ?token=…)
-   in the URL; a browser opened by hand is asked once, on the first 401.
+   in the URL; a page opened by hand shows a token field in the offline
+   banner on the first 401 (window.prompt does not exist inside the
+   Electron tray window, and a dismissed dialog left no way back).
    Either way it is kept in localStorage and scrubbed from the URL. */
 let TOKEN = "";
 try { TOKEN = localStorage.getItem("nodeToken") || ""; } catch {}
@@ -600,7 +610,15 @@ function setToken(t) {
   history.replaceState(null, "", location.pathname +
     (h ? "#dashboard" : location.hash));
 })();
-let tokenAsked = false;
+function useToken(e) {
+  e.preventDefault();
+  const t = document.getElementById("token-input").value.trim();
+  if (!t) return false;
+  setToken(t);
+  document.getElementById("token-form").style.display = "none";
+  poll(); pollInventory();
+  return false;
+}
 
 /* Artifacts under /v1/files are shown by <img>, <video>, download links
    and the mesh viewer as plain browser loads, which cannot carry the
@@ -634,11 +652,12 @@ async function j(url, opts) {
     o.headers = Object.assign({}, o.headers,
                               { Authorization: `Bearer ${TOKEN}` });
   const r = await fetch(url, o);
-  if (r.status === 401 && !tokenAsked && url.startsWith("/v1/")) {
-    tokenAsked = true;
-    const t = prompt("This node needs its swarm token to be used from " +
-                     "here. Paste it (it is remembered in this browser):");
-    if (t && t.trim()) { setToken(t.trim()); return j(url, opts); }
+  if (r.status === 401 && url.startsWith("/v1/")) {
+    // No token, or one the node no longer accepts: forget it and let the
+    // offline banner's field collect the right one, then re-poll.
+    if (TOKEN) setToken("");
+    const f = document.getElementById("token-form");
+    if (f) f.style.display = "flex";
   }
   if (!r.ok) throw new Error((await r.text()).slice(0, 200));
   return r.json();

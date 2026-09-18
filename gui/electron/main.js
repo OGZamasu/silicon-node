@@ -6,6 +6,7 @@ const { app, BrowserWindow, Menu, Tray, nativeImage, shell } =
   require("electron");
 const fs = require("fs");
 const path = require("path");
+const { execFileSync } = require("child_process");
 const ICON = "F:/Windows Silicon Optimizer/silicon-node/server/ui/icon.png";
 
 const NODE = "http://127.0.0.1:8790";
@@ -15,12 +16,28 @@ const UI = NODE + "/ui";
 // swarm token like any other off-box caller (SECURITY.md). It is read
 // from the same file the PySide tray uses; if that fails the page is
 // opened bare and asks for the token itself.
-const SWARM_JSON = "\\\\wsl$\\SiliconNode\\opt\\silicon\\swarm.json";
+const DISTRO = "SiliconNode";
+const SWARM_JSON = `\\\\wsl$\\${DISTRO}\\opt\\silicon\\swarm.json`;
+let tokenCache = { t: "", at: 0 };   // the share is slow; re-read each minute
 function swarmToken() {
-  try {
-    const t = JSON.parse(fs.readFileSync(SWARM_JSON, "utf8")).swarm_token;
+  if (Date.now() - tokenCache.at < 60_000) return tokenCache.t;
+  const parse = (s) => {
+    const t = JSON.parse(s).swarm_token;
     return typeof t === "string" ? t.trim() : "";
-  } catch { return ""; }
+  };
+  let t = "";
+  try { t = parse(fs.readFileSync(SWARM_JSON, "utf8")); } catch {}
+  if (!t) {
+    // The \\wsl$ share is not always mounted when the tray starts with
+    // Windows; ask the distro itself instead.
+    try {
+      t = parse(execFileSync("wsl.exe",
+        ["-d", DISTRO, "--", "cat", "/opt/silicon/swarm.json"],
+        { encoding: "utf8", timeout: 8000, windowsHide: true }));
+    } catch {}
+  }
+  tokenCache = { t, at: Date.now() };
+  return t;
 }
 function authed(url) {
   const t = swarmToken();
