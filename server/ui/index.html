@@ -1469,12 +1469,18 @@ const CAP_NAMES = {
   "text-to-video": "Video clip", "portrait-animate": "Portrait take",
   "talking-head": "Talking head",
 };
+/* Relative while it is still meaningful — up to a day — then "yesterday"
+   with the time, then the date and time: "600 h ago" tells nobody when. */
 function ago(ts) {
   if (!ts) return "";
   const s = Math.max(0, Date.now() / 1000 - ts);
   if (s < 90) return Math.round(s) + " s ago";
   if (s < 5400) return Math.round(s / 60) + " min ago";
-  return Math.round(s / 3600) + " h ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  const d = new Date(ts * 1000);
+  const t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (s < 172800) return "yesterday " + t;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + t;
 }
 function hms(s) {
   if (!isFinite(s)) return "—";
