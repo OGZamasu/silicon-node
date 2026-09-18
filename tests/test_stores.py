@@ -107,3 +107,38 @@ def test_the_host_abstraction_agrees_with_itself():
     assert isinstance(hostos.IS_WSL, bool)
     assert config.PLATFORM == ("windows-wsl2-cuda" if hostos.IS_WSL
                                else "linux-cuda")
+
+
+def test_orca_adapter_is_pinned_and_verified(tmp_path, monkeypatch):
+    """The adapter goes into the model's graph, so its URL is a commit,
+    not a branch, and a downloaded file that does not match the digest
+    is discarded rather than kept."""
+    from server import llamacpp
+    meta = llamacpp.ADAPTERS[llamacpp.ORCA_LORA_FILE]
+    assert "/947a80cd1d3b4f9a97417025e6c2c62223571287/" in meta["url"]
+    assert meta["sha256"] and len(meta["sha256"]) == 64
+
+    monkeypatch.setattr(llamacpp, "GGUF_DIR", tmp_path)
+    dl = llamacpp.GGUFDownloads()
+    good = tmp_path / "a.gguf"
+    good.write_bytes(b"adapter")
+    digest = llamacpp.sha256_of(good)
+    # Present and matching: nothing is queued.
+    dl.start_url("http://127.0.0.1:9/never", "a.gguf", sha256=digest)
+    assert "a.gguf" not in dl.active
+
+    # A worker that "downloaded" the wrong bytes must throw the file away.
+    class _Resp:
+        headers = {"Content-Length": "5"}
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n):
+            data, self.data = getattr(self, "data", b"wrong"), b""
+            return data
+    monkeypatch.setattr(llamacpp.urllib.request, "urlopen",
+                        lambda req, timeout=0: _Resp())
+    bad = tmp_path / "b.gguf"
+    dl.active["b.gguf"] = {"got": 0, "total": 0, "error": None, "repo": "x"}
+    dl._worker("http://127.0.0.1:9/x", "b.gguf", sha256=digest)
+    assert not bad.exists()
+    assert "digest" in dl.active["b.gguf"]["error"]

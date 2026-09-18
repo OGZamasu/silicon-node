@@ -9,6 +9,7 @@ pipelines.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -78,14 +79,31 @@ ADAPTERS: dict[str, dict] = {
     ORCA_LORA_FILE: {
         "for": "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
         "label": "OrcaBonsai uncensored",
-        # 9.7 MB on GitHub, not HF — fetched by direct URL.
+        # 9.7 MB on GitHub, not HF — fetched by direct URL. Pinned to a
+        # commit, not a branch: this file is built into the model's graph,
+        # so what lands must be exactly what was reviewed. The digest is
+        # checked once the download completes; an operator override of
+        # the URL skips the check (they are vouching for their own file).
         "url": os.environ.get(
             "SILICON_NODE_ORCA_LORA_URL",
             "https://raw.githubusercontent.com/Continuum-AI-Corp/"
-            "OrcaBonsai-27B-Uncensored/main/gguf/"
+            "OrcaBonsai-27B-Uncensored/"
+            "947a80cd1d3b4f9a97417025e6c2c62223571287/gguf/"
             "bonsai-abliterate-lora.gguf"),
+        "sha256": (None if os.environ.get("SILICON_NODE_ORCA_LORA_URL")
+                   else "f1669534803d340a496015f5c45125f3437b4d13"
+                        "ec764f40e34488ce83967f42"),
+        "size": 9_682_464,
     },
 }
+
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def adapters_for(model_file: str) -> list[dict]:
@@ -536,19 +554,26 @@ class GGUFDownloads:
         self.start_url(url, filename, label=repo)
 
     def start_url(self, url: str, filename: str,
-                  label: str | None = None) -> None:
+                  label: str | None = None,
+                  sha256: str | None = None) -> None:
         """Direct-URL fetch for artifacts that don't live on HF (the
-        OrcaBonsai adapter is served from GitHub)."""
+        OrcaBonsai adapter is served from GitHub). With a digest, the
+        file is verified once it lands and discarded on a mismatch; a
+        file already present and matching is left alone."""
         GGUF_DIR.mkdir(parents=True, exist_ok=True)
         name = Path(filename).name
+        dest = GGUF_DIR / name
+        if sha256 and dest.exists() and sha256_of(dest) == sha256:
+            return
         if name in self.active and not self.active[name].get("error"):
             return
         self.active[name] = {"got": 0, "total": 0, "error": None,
                              "repo": label or url.split("/")[2]}
-        threading.Thread(target=self._worker, args=(url, name),
+        threading.Thread(target=self._worker, args=(url, name, sha256),
                          daemon=True).start()
 
-    def _worker(self, url: str, name: str) -> None:
+    def _worker(self, url: str, name: str,
+                sha256: str | None = None) -> None:
         dest = GGUF_DIR / name
         try:
             have = dest.stat().st_size if dest.exists() else 0
@@ -567,6 +592,11 @@ class GGUFDownloads:
                         f.write(chunk)
                         self.active[name]["got"] = dest.stat().st_size
             self.active[name]["got"] = dest.stat().st_size
+            if sha256 and sha256_of(dest) != sha256:
+                dest.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"{name} did not match its published digest; "
+                    "the file was discarded.")
         except Exception as exc:  # noqa: BLE001
             log.exception("gguf download failed")
             self.active[name]["error"] = str(exc)[:200]

@@ -1648,7 +1648,8 @@ async def gguf_download(request: Request):
             raise HTTPException(
                 status_code=404,
                 detail=f"No adapter named {body['lora']!r} on this node.")
-        GGUF_DL.start_url(meta["url"], str(body["lora"]))
+        GGUF_DL.start_url(meta["url"], str(body["lora"]),
+                          sha256=meta.get("sha256"))
     return {"ok": True}
 
 
