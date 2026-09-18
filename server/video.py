@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 from . import config
 from .jobs import Job
