@@ -69,6 +69,33 @@ def mmproj_for(model_file: str) -> Path | None:
     return next((c for c in candidates if "Q8_0" in c.name), candidates[0])
 
 
+# Runtime adapters: small LoRA files applied at load time with --lora,
+# keyed to the exact base pack they were derived from. Strictly opt-in —
+# the base model's plain Load never applies one. They live in GGUF_DIR
+# beside the pack but are companions, not models (like projectors).
+ORCA_LORA_FILE = "bonsai-abliterate-lora.gguf"
+ADAPTERS: dict[str, dict] = {
+    ORCA_LORA_FILE: {
+        "for": "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+        "label": "OrcaBonsai uncensored",
+        # 9.7 MB on GitHub, not HF — fetched by direct URL.
+        "url": os.environ.get(
+            "SILICON_NODE_ORCA_LORA_URL",
+            "https://raw.githubusercontent.com/Continuum-AI-Corp/"
+            "OrcaBonsai-27B-Uncensored/main/gguf/"
+            "bonsai-abliterate-lora.gguf"),
+    },
+}
+
+
+def adapters_for(model_file: str) -> list[dict]:
+    """Downloaded adapters that target this base pack, for the UI."""
+    name = Path(model_file).name
+    return [{"file": a, "label": meta["label"]}
+            for a, meta in ADAPTERS.items()
+            if meta["for"] == name and (GGUF_DIR / a).exists()]
+
+
 # One-click picks beside the Hugging Face search: models worth naming because
 # the search can't tell you what they need (a companion file, a fork).
 GGUF_PICKS = [
@@ -80,6 +107,18 @@ GGUF_PICKS = [
      "note": "Qwen3.8 27B in 1.76-bit ternary weights: 98% of its benchmarks "
              "in 5.9 GB, vision and tool calling included. Needs PrismML's "
              "llama.cpp fork, fetched automatically with the file."},
+    {"id": "orcabonsai-27b-uncensored",
+     "name": "OrcaBonsai 27B Uncensored (runtime ablation)",
+     "repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+     "file": "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+     "mmproj": "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+     "lora": ORCA_LORA_FILE,
+     "size_gb": 6.6,
+     "note": "Not-for-all-audiences. The same Bonsai 2 pack with "
+             "OrcaRouter's refusal-direction LoRA applied at runtime "
+             "(rank 1, Apache-2.0): the ternary weights stay "
+             "bit-identical, so this shares its 6.6 GB with the stock "
+             "pick and only adds a 10 MB adapter."},
 ]
 
 # The Mac's "sharp" Qwen chat template (silicon-optimizer #9): a jinja
@@ -156,6 +195,7 @@ class LlamaCppManager:
         self.engine_install: dict | None = None  # progress while fetching
         self.prism_engine_install: dict | None = None
         self.engine_flavor: str | None = None  # which engine is serving
+        self.lora_active: str | None = None  # adapter applied at load
 
     # -- engine install ---------------------------------------------------
 
@@ -319,14 +359,16 @@ class LlamaCppManager:
     def installed_models(self) -> list[dict]:
         if not GGUF_DIR.is_dir():
             return []
-        # Projectors are companions, not models: they ride along with the
-        # weights they belong to instead of appearing as something to load.
+        # Projectors and adapters are companions, not models: they ride
+        # along with the weights they belong to instead of appearing as
+        # something to load.
         return [{"file": p.name,
                  "size_gb": round(p.stat().st_size / 1e9, 1),
                  "engine": "prism" if needs_prism(p.name) else "stock",
-                 "mmproj": mmproj_for(p.name) is not None}
+                 "mmproj": mmproj_for(p.name) is not None,
+                 "adapters": adapters_for(p.name)}
                 for p in sorted(GGUF_DIR.glob("*.gguf"))
-                if "-mmproj-" not in p.name]
+                if "-mmproj-" not in p.name and p.name not in ADAPTERS]
 
     def status(self) -> dict:
         alive = self.healthy(3, max_age=5)
@@ -338,9 +380,11 @@ class LlamaCppManager:
             "engine_flavor": self.engine_flavor if alive else None,
             "running": alive,
             "model": self.model_file if alive else None,
+            "lora": self.lora_active if alive else None,
             "port": PORT,
             "models": self.installed_models(),
             "picks": GGUF_PICKS,
+            "adapters": [a for a in ADAPTERS if (GGUF_DIR / a).exists()],
             "sharp_template": {
                 "downloaded": SHARP_TEMPLATE.exists(),
                 "active": bool(getattr(self, "sharp_active", False)
@@ -370,7 +414,8 @@ class LlamaCppManager:
         return 32768
 
     def start(self, model_file: str, context: int | None = None,
-              wait_healthy_s: float = 240.0) -> None:
+              wait_healthy_s: float = 240.0,
+              lora: str | None = None) -> None:
         with self._lock:
             name = Path(model_file).name
             flavor = "prism" if needs_prism(name) else "stock"
@@ -402,6 +447,23 @@ class LlamaCppManager:
                 # Image input for the 27B Bonsai family; loaded lazily by
                 # llama-server, so text-only chat pays nothing for it.
                 args += ["--mmproj", _path_arg(mmproj)]
+            self.lora_active = None
+            if lora:
+                lname = Path(lora).name
+                if lname not in ADAPTERS:
+                    raise RuntimeError(f"Unknown adapter {lname!r}.")
+                if ADAPTERS[lname]["for"] != name:
+                    raise RuntimeError(
+                        f"{lname} was derived from "
+                        f"{ADAPTERS[lname]['for']}, not {name}.")
+                if not (GGUF_DIR / lname).exists():
+                    raise RuntimeError(
+                        f"{lname} is not downloaded yet — its pick on the "
+                        "Models page fetches it.")
+                # Rank-1 refusal-direction ablation built into the graph
+                # at inference; the base pack itself stays untouched.
+                args += ["--lora", _path_arg(GGUF_DIR / lname)]
+                self.lora_active = lname
             self.sharp_active = False
             if (sharp_suits(name) and SHARP_TEMPLATE.exists()
                     and os.environ.get("SILICON_NODE_SHARP_TEMPLATE",
@@ -444,6 +506,7 @@ class LlamaCppManager:
 
     def stop(self) -> None:
         with self._lock:
+            self.lora_active = None
             if self._proc is not None:
                 try:
                     self._proc.terminate()
@@ -469,13 +532,19 @@ class GGUFDownloads:
         self.active: dict[str, dict] = {}
 
     def start(self, repo: str, filename: str) -> None:
-        GGUF_DIR.mkdir(parents=True, exist_ok=True)
         url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
+        self.start_url(url, filename, label=repo)
+
+    def start_url(self, url: str, filename: str,
+                  label: str | None = None) -> None:
+        """Direct-URL fetch for artifacts that don't live on HF (the
+        OrcaBonsai adapter is served from GitHub)."""
+        GGUF_DIR.mkdir(parents=True, exist_ok=True)
         name = Path(filename).name
         if name in self.active and not self.active[name].get("error"):
             return
         self.active[name] = {"got": 0, "total": 0, "error": None,
-                             "repo": repo}
+                             "repo": label or url.split("/")[2]}
         threading.Thread(target=self._worker, args=(url, name),
                          daemon=True).start()
 

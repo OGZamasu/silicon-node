@@ -1190,10 +1190,11 @@ async function toggleRepo(repo) {
     renderSearch();
   }
 }
-async function dlPick(repo, file, mmproj, btn) {
+async function dlPick(repo, file, mmproj, lora, btn) {
   btn.disabled = true; btn.textContent = "Queued";
   const body = { repo, file };
   if (mmproj) body.mmproj = mmproj;
+  if (lora) body.lora = lora;
   try { await j("/v1/gguf/download", { method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body) }); }
@@ -1208,11 +1209,13 @@ async function dlGguf(repo, file, btn) {
   catch (e) { alert("Download failed: " + e); }
   poll();
 }
-async function loadGguf(file, btn) {
+async function loadGguf(file, btn, lora) {
   btn.disabled = true; btn.innerHTML = `<span class="spin"></span>Loading`;
+  const body = { file };
+  if (lora) body.lora = lora;
   try { await j("/v1/gguf/start", { method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file }) }); }
+    body: JSON.stringify(body) }); }
   catch (e) { alert("Load failed: " + String(e).slice(0, 300)); }
   poll();
 }
@@ -1239,15 +1242,18 @@ function renderGguf() {
   const dls = g.downloads || {};
   const rows = [];
   // One-click picks: named because the search can't tell you what they
-  // need (a companion projector, a fork). Hidden once the file is here.
+  // need (a companion projector, a fork, an adapter). Hidden once their
+  // distinguishing file is here — for adapter picks that is the adapter,
+  // since they share their base weights with another pick.
   const have = new Set([...(g.models || []).map(m => m.file), ...Object.keys(dls)]);
+  const haveAdapters = new Set([...(g.adapters || []), ...Object.keys(dls)]);
   for (const p of g.picks || []) {
-    if (have.has(p.file)) continue;
+    if (p.lora ? haveAdapters.has(p.lora) : have.has(p.file)) continue;
     rows.push(`<div class="row"><span class="dot"></span>
       <div class="grow"><div class="name">${p.name}</div>
       <div class="sub">${p.note}</div></div>
-      <span class="num">${p.size_gb} GB</span>
-      <button class="primary" onclick="dlPick('${p.repo}', '${p.file}', '${p.mmproj || ""}', this)">Download</button>
+      <span class="num">${p.lora && have.has(p.file) ? "0.01" : p.size_gb} GB</span>
+      <button class="primary" onclick="dlPick('${p.repo}', '${p.file}', '${p.mmproj || ""}', '${p.lora || ""}', this)">Download</button>
     </div>`);
   }
   for (const [n, d] of Object.entries(dls)) {
@@ -1264,13 +1270,20 @@ function renderGguf() {
   }
   for (const m of g.models || []) {
     const loaded = g.running && g.model === m.file;
+    const act = loaded && g.lora
+      ? ((m.adapters || []).find(a => a.file === g.lora) || {}).label || g.lora
+      : null;
+    // An adapter gets its own Load beside the plain one — uncensored is
+    // a choice made at load time, never a default.
+    const adapterBtns = loaded ? "" : (m.adapters || []).map(a =>
+      `<button onclick="loadGguf('${m.file}', this, '${a.file}')">Load ${a.label}</button>`).join("");
     rows.push(`<div class="row">
       <span class="dot ${loaded ? "ok" : "warn"}"></span>
       <div class="grow"><div class="name">${m.file}</div>
-      <div class="sub">${loaded ? "loaded and serving" : "installed"}${m.engine === "prism" ? " · PrismML fork" : ""}${m.mmproj ? " · vision" : ""}</div></div>
+      <div class="sub">${loaded ? "loaded and serving" : "installed"}${act ? ` · ${act} adapter active` : ""}${m.engine === "prism" ? " · PrismML fork" : ""}${m.mmproj ? " · vision" : ""}</div></div>
       <span class="num">${m.size_gb} GB</span>
       ${loaded ? `<button onclick="j('/v1/gguf/stop',{method:'POST'}).then(poll)">Unload</button>`
-               : `<button class="primary" onclick="loadGguf('${m.file}', this)">Load</button>`}
+               : `<button class="primary" onclick="loadGguf('${m.file}', this)">Load</button>`}${adapterBtns}
     </div>`);
   }
   if (rows.length) $("#gguf-rows").innerHTML = rows.join("");

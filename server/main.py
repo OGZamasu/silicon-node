@@ -1639,6 +1639,16 @@ async def gguf_download(request: Request):
     if body.get("mmproj"):
         # The vision projector that belongs with the weights (27B Bonsai).
         GGUF_DL.start(body["repo"], body["mmproj"])
+    if body.get("lora"):
+        # A runtime adapter named in the server-side registry — the URL
+        # comes from there, never from the request.
+        from .llamacpp import ADAPTERS  # noqa: PLC0415
+        meta = ADAPTERS.get(str(body["lora"]))
+        if meta is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No adapter named {body['lora']!r} on this node.")
+        GGUF_DL.start_url(meta["url"], str(body["lora"]))
     return {"ok": True}
 
 
@@ -1657,7 +1667,8 @@ async def gguf_start(request: Request):
         pipeline.ENGINE.unload()
         ctx = body.get("context")
         LLAMACPP.start(body.get("file", ""),
-                       int(ctx) if ctx is not None else None)
+                       int(ctx) if ctx is not None else None,
+                       lora=body.get("lora"))
     try:
         # Same event-loop guard as /v1/llm/start (hub 135).
         await asyncio.to_thread(_switch)
