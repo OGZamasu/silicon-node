@@ -1633,12 +1633,18 @@ async def gguf_download(request: Request):
                             detail="repo and file are required.")
     # Fetch the engine alongside the model — PrismML's fork for its
     # ternary packings, the stock build for everything else.
+    from .llamacpp import GGUF_DIR  # noqa: PLC0415
     LLAMACPP.install_engine_async(
         "prism" if needs_prism(body["file"]) else "stock")
-    GGUF_DL.start(body["repo"], body["file"])
-    if body.get("mmproj"):
+    # A pick can share its base file with one already here (Bonsai and its
+    # adapter twin): only fetch what is missing.
+    if not (GGUF_DIR / Path(body["file"]).name).exists():
+        GGUF_DL.start(body["repo"], body["file"])
+    if body.get("mmproj") and not (GGUF_DIR / Path(body["mmproj"]).name).exists():
         # The vision projector that belongs with the weights (27B Bonsai).
         GGUF_DL.start(body["repo"], body["mmproj"])
+    if isinstance(body.get("lora"), dict) and body["lora"].get("url"):
+        GGUF_DL.start_adapter(body["lora"])
     return {"ok": True}
 
 
@@ -1657,7 +1663,9 @@ async def gguf_start(request: Request):
         pipeline.ENGINE.unload()
         ctx = body.get("context")
         LLAMACPP.start(body.get("file", ""),
-                       int(ctx) if ctx is not None else None)
+                       int(ctx) if ctx is not None else None,
+                       lora=body.get("lora") or None,
+                       lora_scale=float(body.get("lora_scale") or 1.0))
     try:
         # Same event-loop guard as /v1/llm/start (hub 135).
         await asyncio.to_thread(_switch)

@@ -107,3 +107,20 @@ def test_the_host_abstraction_agrees_with_itself():
     assert isinstance(hostos.IS_WSL, bool)
     assert config.PLATFORM == ("windows-wsl2-cuda" if hostos.IS_WSL
                                else "linux-cuda")
+
+
+def test_lora_args_follow_the_scale(tmp_path, monkeypatch):
+    """Adapters ride in as llama.cpp's own flags — plain --lora at the
+    published strength, FNAME:SCALE otherwise — and a missing adapter is
+    refused before anything is stopped."""
+    from server import llamacpp
+    monkeypatch.setattr(llamacpp, "LORA_DIR", tmp_path)
+    monkeypatch.setattr(llamacpp.hostos, "IS_WSL", False)
+    assert llamacpp.lora_args(None) == []
+    with pytest.raises(RuntimeError):
+        llamacpp.lora_args("missing.gguf")
+    (tmp_path / "bonsai-abliterate-lora.gguf").write_bytes(b"x")
+    assert llamacpp.lora_args("bonsai-abliterate-lora.gguf") == [
+        "--lora", str(tmp_path / "bonsai-abliterate-lora.gguf")]
+    assert llamacpp.lora_args("bonsai-abliterate-lora.gguf", 2) == [
+        "--lora-scaled", f"{tmp_path / 'bonsai-abliterate-lora.gguf'}:2.0"]

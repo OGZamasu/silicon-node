@@ -9,6 +9,7 @@ pipelines.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -69,6 +70,53 @@ def mmproj_for(model_file: str) -> Path | None:
     return next((c for c in candidates if "Q8_0" in c.name), candidates[0])
 
 
+# LoRA adapters applied at load (llama.cpp's --lora): the base GGUF stays
+# byte-identical and the edit is exact and reversible. Kept beside the
+# weights under loras/.
+LORA_DIR = GGUF_DIR / "loras"
+
+# OrcaRouter's refusal-direction ablation for Ternary Bonsai 2, as a rank-1
+# adapter on all 129 residual writers (github.com/Continuum-AI-Corp/
+# OrcaBonsai-27B-Uncensored, commit 947a80c). Pinned to a commit and a digest.
+ORCABONSAI_LORA = {
+    "file": "bonsai-abliterate-lora.gguf",
+    "url": "https://raw.githubusercontent.com/Continuum-AI-Corp/OrcaBonsai-27B-Uncensored/947a80cd1d3b4f9a97417025e6c2c62223571287/gguf/bonsai-abliterate-lora.gguf",
+    "sha256": "f1669534803d340a496015f5c45125f3437b4d13ec764f40e34488ce83967f42",
+    "size": 9_682_464,
+    "applies_to": "Ternary-Bonsai-2-27B-",   # any packing of that base
+    "name": "OrcaRouter uncensored",
+}
+LORAS = [ORCABONSAI_LORA]
+
+
+def installed_loras() -> list[str]:
+    if not LORA_DIR.is_dir():
+        return []
+    return sorted(p.name for p in LORA_DIR.glob("*.gguf"))
+
+
+def loras_for(model_file: str) -> list[dict]:
+    """Adapters on disk that apply to this base file."""
+    name = Path(model_file).name
+    have = set(installed_loras())
+    return [{"file": lo["file"], "name": lo["name"]}
+            for lo in LORAS
+            if name.startswith(lo["applies_to"]) and lo["file"] in have]
+
+
+def lora_args(lora: str | None, scale: float = 1.0) -> list[str]:
+    """llama.cpp's own flags: plain --lora at the published strength, the
+    FNAME:SCALE form otherwise."""
+    if not lora:
+        return []
+    path = LORA_DIR / Path(lora).name
+    if not path.exists():
+        raise RuntimeError(f"No adapter {Path(lora).name} in the library.")
+    if float(scale) == 1.0:
+        return ["--lora", _path_arg(path)]
+    return ["--lora-scaled", f"{_path_arg(path)}:{float(scale)}"]
+
+
 # One-click picks beside the Hugging Face search: models worth naming because
 # the search can't tell you what they need (a companion file, a fork).
 GGUF_PICKS = [
@@ -80,6 +128,17 @@ GGUF_PICKS = [
      "note": "Qwen3.8 27B in 1.76-bit ternary weights: 98% of its benchmarks "
              "in 5.9 GB, vision and tool calling included. Needs PrismML's "
              "llama.cpp fork, fetched automatically with the file."},
+    {"id": "orcabonsai-27b-uncensored",
+     "name": "OrcaBonsai 27B Uncensored (OrcaRouter, runtime ablation)",
+     "repo": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+     "file": "Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+     "mmproj": "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+     "lora": ORCABONSAI_LORA,
+     "size_gb": 6.6,
+     "note": "The same Bonsai 2 weights with OrcaRouter's refusal-direction "
+             "ablation applied at load as a 9.7 MB adapter: far fewer refusals, "
+             "no measurable capability change, nothing re-quantized. Reuses "
+             "the Bonsai files if they are here; loads with --lora."},
 ]
 
 # The Mac's "sharp" Qwen chat template (silicon-optimizer #9): a jinja
@@ -153,6 +212,7 @@ class LlamaCppManager:
         self._probe: tuple[float, bool] | None = None
         self._logfile = ENGINE_DIR / "llama-server.log"
         self.model_file: str | None = None
+        self.lora_file: str | None = None        # adapter loaded with it
         self.engine_install: dict | None = None  # progress while fetching
         self.prism_engine_install: dict | None = None
         self.engine_flavor: str | None = None  # which engine is serving
@@ -324,7 +384,8 @@ class LlamaCppManager:
         return [{"file": p.name,
                  "size_gb": round(p.stat().st_size / 1e9, 1),
                  "engine": "prism" if needs_prism(p.name) else "stock",
-                 "mmproj": mmproj_for(p.name) is not None}
+                 "mmproj": mmproj_for(p.name) is not None,
+                 "loras": loras_for(p.name)}
                 for p in sorted(GGUF_DIR.glob("*.gguf"))
                 if "-mmproj-" not in p.name]
 
@@ -338,8 +399,10 @@ class LlamaCppManager:
             "engine_flavor": self.engine_flavor if alive else None,
             "running": alive,
             "model": self.model_file if alive else None,
+            "lora": self.lora_file if alive else None,
             "port": PORT,
             "models": self.installed_models(),
+            "loras": installed_loras(),
             "picks": GGUF_PICKS,
             "sharp_template": {
                 "downloaded": SHARP_TEMPLATE.exists(),
@@ -370,10 +433,12 @@ class LlamaCppManager:
         return 32768
 
     def start(self, model_file: str, context: int | None = None,
-              wait_healthy_s: float = 240.0) -> None:
+              wait_healthy_s: float = 240.0, lora: str | None = None,
+              lora_scale: float = 1.0) -> None:
         with self._lock:
             name = Path(model_file).name
             flavor = "prism" if needs_prism(name) else "stock"
+            adapter = lora_args(lora, lora_scale)   # validated before anything stops
             if not self.engine_ready(flavor):
                 self.install_engine_async(flavor)
                 raise RuntimeError(
@@ -402,6 +467,7 @@ class LlamaCppManager:
                 # Image input for the 27B Bonsai family; loaded lazily by
                 # llama-server, so text-only chat pays nothing for it.
                 args += ["--mmproj", _path_arg(mmproj)]
+            args += adapter
             self.sharp_active = False
             if (sharp_suits(name) and SHARP_TEMPLATE.exists()
                     and os.environ.get("SILICON_NODE_SHARP_TEMPLATE",
@@ -424,6 +490,7 @@ class LlamaCppManager:
                 cwd=str(engine_dir), env=env)
             logfh.close()
             self.model_file = name
+            self.lora_file = Path(lora).name if lora else None
             self.engine_flavor = flavor
             self._started_at = time.time()
         deadline = time.time() + wait_healthy_s
@@ -479,8 +546,25 @@ class GGUFDownloads:
         threading.Thread(target=self._worker, args=(url, name),
                          daemon=True).start()
 
-    def _worker(self, url: str, name: str) -> None:
-        dest = GGUF_DIR / name
+    def start_adapter(self, lora: dict) -> None:
+        """A LoRA adapter from its pinned URL into loras/, digest-checked
+        once it lands. Already present and matching: nothing to do."""
+        LORA_DIR.mkdir(parents=True, exist_ok=True)
+        name = Path(lora["file"]).name
+        dest = LORA_DIR / name
+        if dest.exists() and _sha256(dest) == lora.get("sha256", _sha256(dest)):
+            return
+        if name in self.active and not self.active[name].get("error"):
+            return
+        self.active[name] = {"got": 0, "total": lora.get("size", 0),
+                             "error": None, "repo": lora["url"]}
+        threading.Thread(target=self._worker,
+                         args=(lora["url"], name, dest, lora.get("sha256")),
+                         daemon=True).start()
+
+    def _worker(self, url: str, name: str, dest: Path | None = None,
+                sha256: str | None = None) -> None:
+        dest = dest or GGUF_DIR / name
         try:
             have = dest.stat().st_size if dest.exists() else 0
             req = urllib.request.Request(url, headers={
@@ -498,6 +582,10 @@ class GGUFDownloads:
                         f.write(chunk)
                         self.active[name]["got"] = dest.stat().st_size
             self.active[name]["got"] = dest.stat().st_size
+            if sha256 and _sha256(dest) != sha256:
+                dest.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"{name} did not match its published digest.")
         except Exception as exc:  # noqa: BLE001
             log.exception("gguf download failed")
             self.active[name]["error"] = str(exc)[:200]
@@ -506,9 +594,19 @@ class GGUFDownloads:
         out = {}
         for name, st in self.active.items():
             p = GGUF_DIR / name
+            if not p.exists() and (LORA_DIR / name).exists():
+                p = LORA_DIR / name
             out[name] = {"got": p.stat().st_size if p.exists() else 0,
                          "total": st["total"], "error": st["error"]}
         return out
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 LLAMACPP = LlamaCppManager()

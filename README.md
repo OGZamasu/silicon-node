@@ -24,7 +24,8 @@ leaving your house.
 - **Run chat AI.** A 27B model with a huge memory, or any GGUF model you
   download — with a one-click model library. Bonsai 2 27B, PrismML's
   1.76-bit ternary 27B, is a one-click pick; the llama.cpp fork it needs
-  fetches itself.
+  fetches itself. OrcaBonsai — the same weights with OrcaRouter's refusal
+  ablation applied at load as a 9.7 MB adapter — is one click more.
 
 Your Mac sees all of it automatically: live progress bars, a queue you
 can reorder or cancel, and a card showing exactly what your GPU is doing
