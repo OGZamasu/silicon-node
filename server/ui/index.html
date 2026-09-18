@@ -662,6 +662,9 @@ setInterval(poll, 2500);
 let INV = null;
 async function pollInventory() {
   try { INV = await j("/v1/models"); } catch { INV = null; }
+  // The Models page offers Install for anything the store can fetch, so it
+  // needs the store listing too, not only when the Store section is open.
+  if (!STOREV) { try { STOREV = await j("/v1/store"); } catch {} }
   renderNodeModels();
 }
 setInterval(pollInventory, 15000);
@@ -760,8 +763,16 @@ function modelDetail(m, cap, disabled) {
       : `<button class="primary" onclick="event.stopPropagation(); ggufLoadFile('${esc(m.id)}')">Load</button>`);
   if (cap && CAP_TOGGLABLE.has(cap.id))
     acts.push(`<button onclick="event.stopPropagation(); capToggle('${cap.id}', ${disabled})">${disabled ? "Enable service" : "Disable service"}</button>`);
-  acts.push(`<button onclick="event.stopPropagation(); modelReveal('${esc(m.id)}')">Show in Explorer</button>`);
-  if (m.deletable)
+  // Not installed yet: the store's Install belongs here too, and an
+  // Uninstall for weights that are not on disk is noise.
+  const storeEntry = (STOREV && STOREV.models || []).find(x => x.id === m.id);
+  if (!m.installed && storeEntry && storeEntry.installable)
+    acts.push(INSTALLING[m.id]
+      ? `<button disabled><span class="spin"></span>Installing…</button>`
+      : `<button class="primary" onclick="event.stopPropagation(); storeInstall('${esc(m.id)}')">Install${storeEntry.size_bytes ? ` (${(storeEntry.size_bytes / 1e9).toFixed(0)} GB)` : ""}</button>`);
+  if (m.installed)
+    acts.push(`<button onclick="event.stopPropagation(); modelReveal('${esc(m.id)}')">Show in Explorer</button>`);
+  if (m.deletable && m.installed)
     acts.push(confirmDel === m.id
       ? `<button class="danger" onclick="event.stopPropagation(); modelDelete('${esc(m.id)}')">Really uninstall${m.size_gb ? ` — frees ${m.size_gb} GB` : ""}</button>`
       : `<button class="danger" onclick="event.stopPropagation(); confirmDel = '${esc(m.id)}'; renderNodeModels()">Uninstall</button>`);
