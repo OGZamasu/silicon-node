@@ -30,7 +30,8 @@ DEFAULTS: dict[str, dict] = {
                       "ltx_steps": 8, "ltx_uncensored_steps": 8,
                       "ltx_uncensored_cfg": 3.5},
     "text-to-image": {"default_model": "qwen-image", "qwen_steps": 30,
-                      "sana_steps": 20, "sdxl_steps": 30},
+                      "sana_steps": 20, "sdxl_steps": 30,
+                      "flux2_steps": 28, "flux2_guidance": 4.0},
     "portrait-animate": {},
     "talking-head": {},
 }

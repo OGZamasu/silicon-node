@@ -116,15 +116,16 @@ async def swarm_client_mint(request: Request):
     from .clients import CLIENTS  # noqa: PLC0415
     body = await request.json()
     name = str(body.get("name", ""))
+    role = str(body.get("role") or "member")
     try:
-        name, token = CLIENTS.mint(name)
+        name, token = CLIENTS.mint(name, role=role)
     except KeyError:
         raise HTTPException(
             status_code=409,
             detail=f"A client named {name!r} already exists.") from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    return {"name": name, "token": token}
+    return {"name": name, "token": token, "role": role}
 
 
 @app.get("/swarm/clients")
@@ -196,6 +197,9 @@ def _role(request: Request) -> str:
         return "admin"
     if config.is_node_token(tok):
         return "node"
+    from .clients import CLIENTS  # noqa: PLC0415
+    if CLIENTS.role_of(tok) == "admin":
+        return "admin"           # minted as such by the swarm admin
     return "member"
 
 

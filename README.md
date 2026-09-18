@@ -11,6 +11,8 @@ leaving your house.
 
 ## What your PC can do
 
+- **Make images from text.** Qwen-Image, Sana, SDXL and FLUX.2 [dev] —
+  the big ones NF4-quantized at load so they fit a 24 GB card.
 - **Make videos from text.** Two engines — one fast for trying ideas, one
   slower for the good version — plus an optional adult-content LTX-2.3
   merge from the Store, with sound.
