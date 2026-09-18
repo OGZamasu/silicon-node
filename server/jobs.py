@@ -210,6 +210,14 @@ class JobStore:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def snapshot(self) -> list[Job]:
+        """Every job the store knows, copied under the lock. Handlers that
+        walk the table must use this: the worker adds to it and the
+        retention sweep pops from it on other threads, and iterating the
+        live dict while that happens raises mid-request."""
+        with self._lock:
+            return list(self._jobs.values())
+
     def queue_depth(self) -> int:
         with self._lock:
             return len(self._pending) + (1 if self._current else 0)

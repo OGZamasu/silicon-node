@@ -132,6 +132,39 @@ class TestRetention:
         assert not job.dir.exists()
 
 
+class TestJobTableRaces:
+
+    def test_listing_jobs_while_a_sweep_pops_them_never_500s(
+            self, client, tokens, store):
+        """jobs_list walks the job table while the worker thread adds to
+        it and the retention sweep pops from it. A dict iterated while
+        another thread changes its size raises mid-request."""
+        import threading
+
+        for _ in range(30):
+            finished_job(store, age_days=30)
+        stop = threading.Event()
+
+        def churn():
+            n = 0
+            while not stop.is_set():
+                job = finished_job(store, age_days=30)
+                store._delete(job)                # pops under the lock
+                n += 1
+            return n
+
+        t = threading.Thread(target=churn)
+        t.start()
+        try:
+            for _ in range(150):
+                r = client.get("/v1/jobs", headers={
+                    "Authorization": f"Bearer {tokens['node']}"})
+                assert r.status_code == 200, r.text
+        finally:
+            stop.set()
+            t.join(5)
+
+
 class TestPruneEndpoint:
 
     def test_a_member_cannot_delete_other_peoples_results(

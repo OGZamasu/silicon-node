@@ -278,7 +278,7 @@ async def image_to_mesh(
 @app.get("/v1/jobs")
 def jobs_list():
     """Recent jobs, newest first (for the dashboard)."""
-    jobs = sorted(STORE._jobs.values(), key=lambda j: j.created_at,
+    jobs = sorted(STORE.snapshot(), key=lambda j: j.created_at,
                   reverse=True)[:20]
     return [{**j.to_api(), "capability": j.capability, "state": j.state,
              "created_at": j.created_at, "started_at": j.started_at,
@@ -616,7 +616,7 @@ def _talkinghead_ready() -> bool:
 def _measured(cap: str, field: str):
     """Aggregate receipts of finished jobs; None until first measurement."""
     samples = []
-    for job in list(STORE._jobs.values()):
+    for job in STORE.snapshot():
         if job.capability != cap or job.state != "done":
             continue
         if field == "typical_seconds" and job.started_at and job.finished_at:
@@ -1463,7 +1463,7 @@ async def store_install(request: Request):
     refusal = modelstore.disk_refusal(entry)
     if refusal:
         raise HTTPException(status_code=507, detail=refusal)
-    for j in STORE._jobs.values():
+    for j in STORE.snapshot():
         if (j.capability == "store-install" and j.state in
                 ("queued", "running") and j.params.get("model_id") == mid):
             return {"ok": True, "job_id": j.job_id,
@@ -1487,7 +1487,7 @@ def store_delete(model_id: str, request: Request):
     if not modelstore._installed(entry):
         return {"ok": True, "already_absent": True,
                 "detail": f"{entry['name']} is not installed."}
-    for j in STORE._jobs.values():
+    for j in STORE.snapshot():
         if j.state not in ("queued", "running"):
             continue
         if j.capability == entry["capability"]:

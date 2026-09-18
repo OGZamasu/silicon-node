@@ -165,5 +165,18 @@ def test_an_interrupted_job_comes_back_as_failed(store):
     assert "restarted" in reloaded.error
 
 
+def test_a_snapshot_survives_the_table_changing_under_it(store):
+    """Handlers walk the job table while the worker adds to it and the
+    retention sweep pops from it; the copy they get must not care."""
+    ids = [store.submit("noop", {}).job_id for _ in range(3)]
+    seen = []
+    for job in store.snapshot():
+        store._jobs.pop(ids[-1], None)      # what a concurrent prune does
+        seen.append(job.job_id)
+    # The store also reloads earlier tests' receipts from the scratch dir,
+    # so "at least ours, and no RuntimeError" is the contract.
+    assert set(ids) <= set(seen)
+
+
 def test_cancellation_is_its_own_exception_type():
     assert issubclass(JobCancelled, Exception)
