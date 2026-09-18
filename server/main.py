@@ -346,7 +346,9 @@ async def jobs_prune(request: Request):
 
     Retention runs on its own (at startup and after every job), so this is
     for the case where the disk is full *today*: the dashboard's Free space
-    button, and `keep`/`max_age_days` for a one-off deeper sweep.
+    button, and `keep`/`max_age_days` for a one-off deeper sweep. Both
+    limits must agree before a job goes, and a zero in either means no
+    sweep at all — the same rule as the SILICON_NODE_RETAIN_* settings.
     """
     _require_operator(request, "Deleting finished jobs and their artifacts")
     try:

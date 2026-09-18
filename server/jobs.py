@@ -294,27 +294,27 @@ class JobStore:
         """Delete the oldest finished jobs, with their inputs and artifacts.
 
         Only done/failed jobs are candidates: a queued or running job is
-        someone's render in flight. The newest `keep` finished jobs survive
-        whatever their age, so a node idle for a month still has its last
-        results to show. Returns what went — a silent deleter of someone's
-        renders is not something to ship.
+        someone's render in flight. A finished job goes only when it is
+        BOTH outside the newest `keep` AND older than `max_age_days`, so
+        a node idle for a month still has its last results to show. A
+        zero (or less) in either limit means retention is off: nothing is
+        deleted. Returns what went — a silent deleter of someone's renders
+        is not something to ship.
         """
         keep = config.RETAIN_JOBS if keep is None else keep
         max_age_days = (config.RETAIN_DAYS if max_age_days is None
                         else max_age_days)
-        cutoff = (time.time() - max_age_days * 86400
-                  if max_age_days > 0 else None)
 
         with self._lock:
             finished = [j for j in self._jobs.values()
                         if j.state in ("done", "failed")]
+        if keep <= 0 or max_age_days <= 0:
+            return {"removed": [], "freed_bytes": 0, "kept": len(finished)}
+        cutoff = time.time() - max_age_days * 86400
         # Oldest first, so "keep the newest N" is a tail slice.
         finished.sort(key=lambda j: j.finished_at or j.created_at or 0.0)
-        survivors = finished[-keep:] if keep > 0 else []
-        doomed = finished[:len(finished) - len(survivors)]
-        if cutoff is not None:
-            doomed = [j for j in doomed
-                      if (j.finished_at or j.created_at or 0.0) < cutoff]
+        doomed = [j for j in finished[:-keep]
+                  if (j.finished_at or j.created_at or 0.0) < cutoff]
 
         removed, freed = [], 0
         for job in doomed:

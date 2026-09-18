@@ -58,7 +58,8 @@ class TestRetention:
 
     def test_an_old_finished_job_and_its_artifacts_are_deleted(self, store):
         old = finished_job(store, age_days=30)
-        result = store.prune(keep=0, max_age_days=14)
+        finished_job(store, age_days=0)           # the newest, always kept
+        result = store.prune(keep=1, max_age_days=14)
 
         assert old.job_id in result["removed"]
         assert not old.dir.exists()
@@ -70,7 +71,8 @@ class TestRetention:
 
     def test_a_recent_job_survives_the_age_sweep(self, store):
         fresh = finished_job(store, age_days=1)
-        store.prune(keep=0, max_age_days=14)
+        finished_job(store, age_days=0)   # so `fresh` is outside keep=1
+        store.prune(keep=1, max_age_days=14)
 
         assert fresh.dir.exists()
         assert store.get(fresh.job_id) is not None
@@ -84,30 +86,57 @@ class TestRetention:
         assert store.get(jobs[1].job_id) is not None
         assert store.get(jobs[2].job_id) is not None
 
-    def test_a_count_limit_prunes_without_any_age_limit(self, store):
-        jobs = [finished_job(store, age_days=d) for d in (0.3, 0.2, 0.1)]
-        store.prune(keep=1, max_age_days=0)
+    def test_zero_days_turns_retention_off(self, store):
+        """"0 days" would read as "keep nothing"; it means "never delete"."""
+        jobs = [finished_job(store, age_days=d) for d in (90, 60, 30)]
+        result = store.prune(keep=1, max_age_days=0)
 
-        assert [j.job_id for j in jobs if store.get(j.job_id)] \
-            == [jobs[2].job_id]
+        assert result["removed"] == []
+        assert result["kept"] == 3
+        assert all(store.get(j.job_id) for j in jobs)
+
+    def test_zero_jobs_turns_retention_off(self, store):
+        old = finished_job(store, age_days=90)
+        result = store.prune(keep=0, max_age_days=14)
+
+        assert result["removed"] == []
+        assert store.get(old.job_id) is not None
+        assert old.dir.exists()
+
+    def test_retention_off_in_config_deletes_nothing_on_the_worker_sweep(
+            self, store, monkeypatch):
+        monkeypatch.setattr(config, "RETAIN_JOBS", 0)
+        monkeypatch.setattr(config, "RETAIN_DAYS", 7)
+        old = finished_job(store, age_days=30)
+        for _ in range(2):
+            finished_job(store, age_days=0)
+        store.prune()                      # as the worker and startup call it
+
+        assert store.get(old.job_id) is not None
 
     def test_failed_jobs_are_pruned_too(self, store):
         failed = finished_job(store, age_days=30, state="failed")
-        store.prune(keep=0, max_age_days=14)
+        finished_job(store, age_days=0)
+        store.prune(keep=1, max_age_days=14)
 
         assert store.get(failed.job_id) is None
 
     def test_a_queued_or_running_job_is_never_pruned(self, store):
         queued = finished_job(store, age_days=99, state="queued")
         running = finished_job(store, age_days=99, state="running")
-        store.prune(keep=0, max_age_days=0.0001)
+        older = finished_job(store, age_days=99)
+        newer = finished_job(store, age_days=98)
+        store.prune(keep=1, max_age_days=0.0001)
 
-        # Someone is waiting on both of these, whatever their timestamps say.
+        # The sweep was live — it took the older finished job…
+        assert store.get(older.job_id) is None
+        assert store.get(newer.job_id) is not None
+        # …but someone is waiting on these, whatever their timestamps say.
         assert store.get(queued.job_id) is not None
         assert store.get(running.job_id) is not None
 
     def test_pruning_nothing_is_not_an_error(self, store):
-        assert store.prune(keep=0, max_age_days=14) == {
+        assert store.prune(keep=1, max_age_days=14) == {
             "removed": [], "freed_bytes": 0, "kept": 0}
 
     def test_defaults_come_from_config(self, store, monkeypatch):
@@ -123,10 +152,11 @@ class TestRetention:
 
     def test_a_missing_artifact_does_not_stop_the_sweep(self, store):
         job = finished_job(store, age_days=30)
+        finished_job(store, age_days=0)
         (config.FILES_DIR / job.result_files[0]).unlink()
         # Half-deleted state is normal after a crash mid-prune; it must not
         # leave the job directory behind forever.
-        store.prune(keep=0, max_age_days=14)
+        store.prune(keep=1, max_age_days=14)
 
         assert store.get(job.job_id) is None
         assert not job.dir.exists()
@@ -176,12 +206,24 @@ class TestPruneEndpoint:
 
     def test_the_owner_can_reclaim_disk_on_demand(self, client, tokens, store):
         job = finished_job(store, age_days=30)
+        finished_job(store, age_days=0)
+        response = client.post(
+            "/v1/jobs/prune", json={"keep": 1, "max_age_days": 14},
+            headers={"Authorization": f"Bearer {tokens['node']}"})
+
+        assert response.status_code == 200
+        assert job.job_id in response.json()["removed"]
+
+    def test_a_zero_limit_on_the_endpoint_means_no_sweep(
+            self, client, tokens, store):
+        job = finished_job(store, age_days=30)
         response = client.post(
             "/v1/jobs/prune", json={"keep": 0, "max_age_days": 14},
             headers={"Authorization": f"Bearer {tokens['node']}"})
 
         assert response.status_code == 200
-        assert job.job_id in response.json()["removed"]
+        assert response.json()["removed"] == []
+        assert store.get(job.job_id) is not None
 
     def test_pruning_runs_off_the_event_loop(
             self, client, tokens, monkeypatch):
@@ -204,7 +246,7 @@ class TestPruneEndpoint:
         monkeypatch.setattr(STORE, "prune", fake_prune)
         monkeypatch.setattr(asyncio, "to_thread", capture_loop_thread)
         response = client.post(
-            "/v1/jobs/prune", json={"keep": 0, "max_age_days": 14},
+            "/v1/jobs/prune", json={"keep": 1, "max_age_days": 14},
             headers={"Authorization": f"Bearer {tokens['node']}"})
 
         assert response.status_code == 200

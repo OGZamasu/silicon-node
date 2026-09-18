@@ -129,8 +129,12 @@ OOM_EXIT_CODE = 3
 # Retention. Every job keeps its inputs and its artifacts forever unless
 # something removes them, and a node that renders 720p clips fills a disk
 # in weeks — at which point every capability fails at once, on a machine
-# nobody is sitting at. Finished jobs are pruned oldest-first; the newest
-# RETAIN_JOBS are always kept, whatever their age. 0 disables either rule.
+# nobody is sitting at. A finished job is deleted only when it is BOTH
+# outside the newest RETAIN_JOBS AND older than RETAIN_DAYS; queued,
+# running and held jobs are never touched. A zero in EITHER setting turns
+# retention off entirely — nothing is ever deleted — because "0 jobs" or
+# "0 days" read as "keep nothing" would wipe every finished render on the
+# next sweep.
 RETAIN_JOBS = int(os.environ.get("SILICON_NODE_RETAIN_JOBS", "200"))
 RETAIN_DAYS = float(os.environ.get("SILICON_NODE_RETAIN_DAYS", "14"))
 

@@ -56,12 +56,15 @@ budgets are enforced rather than documented:
 | Setting | Default | What it means |
 |---|---|---|
 | `SILICON_NODE_MAX_UPLOAD_MB` | 2048 | Bodies above this are refused with 413 — on the declared `Content-Length` first, then while streaming, so nothing oversized lands on disk |
-| `SILICON_NODE_RETAIN_JOBS` | 200 | Finished jobs kept regardless of age |
-| `SILICON_NODE_RETAIN_DAYS` | 14 | Finished jobs older than this are deleted with their inputs and artifacts, once the newest `RETAIN_JOBS` are safe |
+| `SILICON_NODE_RETAIN_JOBS` | 200 | The newest finished jobs, kept regardless of age |
+| `SILICON_NODE_RETAIN_DAYS` | 14 | A finished job outside the newest `RETAIN_JOBS` is deleted — inputs, receipt and rendered artifacts — once it is older than this |
 
-Retention runs at startup and after every finished job; `POST
-/v1/jobs/prune` (operator only) reclaims space immediately. Queued,
-running and held jobs are never pruned.
+A finished job goes only when *both* limits say so. **A zero in either
+setting turns retention off** — nothing is ever deleted — rather than
+meaning "keep nothing". Retention runs at startup and after every
+finished job; `POST /v1/jobs/prune` (operator only) reclaims space
+immediately and takes the same `keep` / `max_age_days` with the same
+zero-means-off rule. Queued, running and held jobs are never pruned.
 
 ## Checking it
 
