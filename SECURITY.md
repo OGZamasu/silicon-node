@@ -24,10 +24,16 @@ enforces the same rule on its side.
 - A **wrong token is always rejected**, even before you turn on strict
   enforcement — so a typo shows up immediately, not in an incident.
 - **Every request from another machine carries a token.** Requests
-  arriving directly on loopback are the owner's own dashboard and tray
-  GUI and stay open; a request carrying any forwarding header is treated
-  as remote even when its source address is loopback, and needs a bearer
-  token.
+  arriving directly on loopback stay open; a request carrying any
+  forwarding header is treated as remote even when its source address is
+  loopback, and needs a bearer token.
+- **The owner's own dashboard and tray carry the swarm token too.** On
+  the WSL node they are Windows programs, so their traffic comes through
+  the port proxy and never looks like loopback. The tray reads the token
+  from `swarm.json` and opens the dashboard as `/ui#token=…`; the page
+  keeps it in the browser's localStorage and scrubs it from the URL. A
+  dashboard opened by hand (another PC, or the Mac's browser on the
+  tailnet) asks for the token once, on its first 401.
 - **Members are not operators.** A paired client token submits jobs and
   chats. Changing abilities, uninstalling models, starting downloads,
   pausing serving, stopping engines and revealing folders on the host

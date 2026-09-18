@@ -124,6 +124,13 @@ def _req(url: str, data: bytes | None = None, method: str = "GET",
          headers: dict | None = None, timeout: float = 8.0):
     h = {"User-Agent": "silicon-node-gui"}
     h.update(headers or {})
+    if url.startswith(NODE) and "Authorization" not in h:
+        # This tray runs on Windows, so its calls reach the WSL service
+        # through the port proxy — never from loopback — and need the
+        # swarm token like any other off-box caller (SECURITY.md).
+        tok = node_token()
+        if tok:
+            h["Authorization"] = f"Bearer {tok}"
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
@@ -185,6 +192,21 @@ def swarm_config() -> dict:
         return json.loads(SWARM_JSON.read_text())
     except Exception:  # noqa: BLE001
         return {}
+
+
+_TOKEN_CACHE = {"token": "", "at": 0.0}
+
+
+def node_token() -> str:
+    """The swarm token for this node's own API, re-read from swarm.json
+    at most once a minute (it sits on the \\wsl$ share)."""
+    import time  # noqa: PLC0415
+    now = time.time()
+    if now - _TOKEN_CACHE["at"] > 60:
+        _TOKEN_CACHE["token"] = str(swarm_config().get("swarm_token")
+                                    or "").strip()
+        _TOKEN_CACHE["at"] = now
+    return _TOKEN_CACHE["token"]
 
 
 # ---------------------------------------------------------------------------

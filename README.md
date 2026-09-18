@@ -91,7 +91,10 @@ Everything the Mac does goes through a plain HTTP API you can use too:
 submit jobs, watch progress, manage models, control the queue. There's
 also an MCP server (`mcp_server.py`) so Claude or ChatGPT can drive your
 node directly, and a dashboard in any browser at
-`http://127.0.0.1:8790/ui`.
+`http://127.0.0.1:8790/ui`. The tray opens it with the swarm token
+attached; opened by hand (on the WSL node that address goes through the
+Windows port proxy, so it counts as remote) the page asks for the token
+once and remembers it — or paste it as `/ui#token=…`.
 
 Changing something? `./scripts/check.sh` runs ruff and the whole test
 suite, and needs neither the GPU nor any weights — the tests repoint every

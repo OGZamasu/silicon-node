@@ -578,9 +578,43 @@ function go(p) {
 }
 function route() { go((location.hash || "#dashboard").slice(1)); }
 
+/* ---------- auth ----------
+   Every /v1/ call from off this machine needs a bearer token (SECURITY.md)
+   — and on the WSL node even the owner's own browser and tray arrive
+   through the Windows port proxy, so this page always sends one when it
+   has one. The tray hands the swarm token over as #token=… (or ?token=…)
+   in the URL; a browser opened by hand is asked once, on the first 401.
+   Either way it is kept in localStorage and scrubbed from the URL. */
+let TOKEN = "";
+try { TOKEN = localStorage.getItem("nodeToken") || ""; } catch {}
+function setToken(t) {
+  TOKEN = t;
+  try { localStorage.setItem("nodeToken", t); } catch {}
+}
+(function takeTokenFromUrl() {
+  const q = new URLSearchParams(location.search).get("token");
+  const h = /^#token=(.+)$/.exec(location.hash);
+  const t = q || (h && decodeURIComponent(h[1]));
+  if (!t) return;
+  setToken(t);
+  history.replaceState(null, "", location.pathname +
+    (h ? "#dashboard" : location.hash));
+})();
+let tokenAsked = false;
+
 /* ---------- polling ---------- */
 async function j(url, opts) {
-  const r = await fetch(url, opts);
+  const o = Object.assign({}, opts);
+  if (TOKEN)
+    o.headers = Object.assign({}, o.headers,
+                              { Authorization: `Bearer ${TOKEN}` });
+  const r = await fetch(url, o);
+  if (r.status === 401 && !tokenAsked && url.startsWith("/v1/")) {
+    tokenAsked = true;
+    const t = prompt("This node needs its swarm token to be used from " +
+                     "here. Paste it (it is remembered in this browser):");
+    if (t && t.trim()) { setToken(t.trim()); return j(url, opts); }
+  }
   if (!r.ok) throw new Error((await r.text()).slice(0, 200));
   return r.json();
 }
