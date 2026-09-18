@@ -193,6 +193,19 @@ class JobStore:
                  {k: v for k, v in job.params.items()
                   if not k.endswith("_path")})
 
+    def abandon(self, job: Job, reason: str) -> None:
+        """A deferred job whose input never reached the disk (upload
+        refused, body undecodable). Nothing will ever enqueue it, so it
+        must not sit in the table as queued forever — fail it with the
+        reason the submitter was given, and retention will sweep it."""
+        with self._cv:
+            if job.state != "queued" or job.job_id in self._pending:
+                return
+            job.state = "failed"
+            job.error = reason
+            job.finished_at = time.time()
+        job.save()
+
     def get(self, job_id: str) -> Optional[Job]:
         with self._lock:
             return self._jobs.get(job_id)

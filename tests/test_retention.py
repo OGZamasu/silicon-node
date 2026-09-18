@@ -242,6 +242,31 @@ class TestUploadLimits:
         # A truncated PNG on disk would be enqueued as a real job input.
         assert not destination.exists()
 
+    def test_a_refused_input_does_not_leave_a_job_queued_forever(
+            self, client, tokens, store, monkeypatch):
+        """Every submit route creates its job before writing the input
+        (defer=True). If that write is refused the caller gets the 4xx —
+        and the job must read as failed, not sit in /v1/jobs as a
+        running job with no progress until the next restart."""
+        from server import video
+        monkeypatch.setattr(video.ENGINE, "ready", lambda: True)
+        monkeypatch.setattr(video.ENGINE, "weights_present", lambda: True)
+        store.register("text-to-video", lambda job, progress: [])
+        before = set(store._jobs)
+
+        # "abc" is not a multiple of four characters: b64decode raises.
+        response = client.post(
+            "/v1/text-to-video",
+            json={"prompt": "a lighthouse", "image_b64": "abc"},
+            headers={"Authorization": f"Bearer {tokens['node']}"})
+
+        assert response.status_code == 400
+        new = [store._jobs[i] for i in set(store._jobs) - before]
+        assert len(new) == 1
+        assert new[0].state == "failed"
+        assert "Input rejected" in new[0].error
+        assert new[0].job_id not in store._pending
+
     def test_decoded_bodies_are_held_to_the_same_ceiling(self, tmp_path):
         import asyncio
 

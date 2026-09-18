@@ -15,6 +15,7 @@ Phase 2:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
 import subprocess
@@ -224,6 +225,21 @@ def _submitter(request: Request, cap: Optional[str] = None) -> dict:
             "user_agent": request.headers.get("user-agent", "")[:120]}
 
 
+@contextlib.contextmanager
+def _staging(job):
+    """The window between STORE.submit(defer=True) and STORE.enqueue():
+    the job exists but its input is still being written. If that write
+    is refused (413 over the upload ceiling, undecodable base64, an empty
+    file) the submitter gets the error — and the job must not stay queued
+    forever, because nothing will ever enqueue it."""
+    try:
+        yield
+    except BaseException as exc:
+        detail = getattr(exc, "detail", None) or str(exc) or "input rejected"
+        STORE.abandon(job, f"Input rejected: {detail}")
+        raise
+
+
 @app.post("/v1/image-to-mesh")
 async def image_to_mesh(
     request: Request,
@@ -247,11 +263,13 @@ async def image_to_mesh(
     job.dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(image.filename or "input.png").suffix or ".png"
     image_path = job.dir / f"input{suffix}"
-    await uploads.save_upload(image, image_path)
-    if image_path.stat().st_size == 0:
-        raise HTTPException(
-            status_code=400,
-            detail="The uploaded image is empty. Please send a PNG or JPEG.")
+    with _staging(job):
+        await uploads.save_upload(image, image_path)
+        if image_path.stat().st_size == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded image is empty. Please send a PNG or "
+                       "JPEG.")
     job.params["image_path"] = str(image_path)
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -1109,7 +1127,8 @@ async def retopologize_upload(
     job.submitted_by = _submitter(request, "retopologize")
     job.dir.mkdir(parents=True, exist_ok=True)
     mesh_path = job.dir / f"input{suffix}"
-    await uploads.save_upload(mesh, mesh_path)
+    with _staging(job):
+        await uploads.save_upload(mesh, mesh_path)
     job.params["mesh_path"] = str(mesh_path)
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -1356,14 +1375,16 @@ async def text_to_video_submit(request: Request):
     job.submitted_by = _submitter(request, "text-to-video")
     job.dir.mkdir(parents=True, exist_ok=True)
     if body.get("image_b64"):
-        try:
-            img = base64.b64decode(body["image_b64"])
-        except ValueError:
-            raise HTTPException(status_code=400,
-                                detail="image_b64 is not valid base64."
-                                ) from None
-        suffix = Path(body.get("image_name", "start.png")).suffix or ".png"
-        await uploads.write_bytes(job.dir / f"start{suffix}", img)
+        with _staging(job):
+            try:
+                img = base64.b64decode(body["image_b64"])
+            except ValueError:
+                raise HTTPException(status_code=400,
+                                    detail="image_b64 is not valid base64."
+                                    ) from None
+            suffix = (Path(body.get("image_name", "start.png")).suffix
+                      or ".png")
+            await uploads.write_bytes(job.dir / f"start{suffix}", img)
         job.params["image_path"] = str(job.dir / f"start{suffix}")
     STORE.enqueue(job)
     return {"job_id": job.job_id}
@@ -1512,8 +1533,9 @@ async def portrait_animate_submit(request: Request):
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     drv_suffix = Path(body.get("driving_name", "d.mp4")).suffix or ".mp4"
-    await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
-    await uploads.write_bytes(job.dir / f"driving{drv_suffix}", driving)
+    with _staging(job):
+        await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
+        await uploads.write_bytes(job.dir / f"driving{drv_suffix}", driving)
     job.params["image_path"] = str(job.dir / f"portrait{img_suffix}")
     job.params["driving_path"] = str(job.dir / f"driving{drv_suffix}")
     STORE.enqueue(job)
@@ -1546,8 +1568,9 @@ async def talking_head_submit(request: Request):
     job.dir.mkdir(parents=True, exist_ok=True)
     img_suffix = Path(body.get("image_name", "p.jpg")).suffix or ".jpg"
     aud_suffix = Path(body.get("audio_name", "a.wav")).suffix or ".wav"
-    await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
-    await uploads.write_bytes(job.dir / f"speech{aud_suffix}", audio)
+    with _staging(job):
+        await uploads.write_bytes(job.dir / f"portrait{img_suffix}", image)
+        await uploads.write_bytes(job.dir / f"speech{aud_suffix}", audio)
     job.params["image_path"] = str(job.dir / f"portrait{img_suffix}")
     job.params["audio_path"] = str(job.dir / f"speech{aud_suffix}")
     STORE.enqueue(job)

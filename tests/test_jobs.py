@@ -78,6 +78,25 @@ def test_a_deferred_job_does_not_run_until_enqueued(store):
     assert drain(store, job.job_id).state == "done"
 
 
+def test_an_abandoned_deferred_job_is_failed_not_left_queued(store):
+    """A submit handler creates the job before its input is on disk; if
+    the upload is then refused, nothing will ever enqueue it."""
+    store.start_worker()
+    job = store.submit("noop", {}, defer=True)
+    store.abandon(job, "Input rejected: too large")
+    assert store.get(job.job_id).state == "failed"
+    assert "too large" in store.get(job.job_id).error
+    assert json.loads((job.dir / "status.json").read_text())["state"] \
+        == "failed"
+    # And it never runs: only a real enqueue puts it in front of the worker.
+    time.sleep(0.2)
+    assert store.get(job.job_id).state == "failed"
+    # A job that did get enqueued is left alone — abandon is not cancel.
+    live = store.submit("noop", {})
+    store.abandon(live, "nope")
+    assert drain(store, live.job_id).state == "done"
+
+
 def test_a_held_job_is_skipped_until_released(store):
     blocked = threading.Event()
     store.register("block", lambda job, progress: blocked.wait(10) or
