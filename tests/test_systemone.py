@@ -129,8 +129,12 @@ def test_a_batch_answers_every_question_in_one_pass(lane):
     assert body["questions"] == 3
     # The batch is one forward pass, so per-question time is the whole
     # request divided across it — that is the lane's selling point.
+    # Both numbers are rounded to 2 dp, so compare with that tolerance
+    # rather than a ratio: against this instant stub the values are
+    # ~0.01 ms, where a relative check is all rounding error.
     assert (body["latency_ms_per_question"]
-            == pytest.approx(body["latency_ms"] / 3, rel=0.01))
+            == pytest.approx(body["latency_ms"] / 3, abs=0.01))
+    assert body["latency_ms_per_question"] <= body["latency_ms"]
 
 
 def test_a_plain_string_state_is_accepted(lane):
