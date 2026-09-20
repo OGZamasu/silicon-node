@@ -403,6 +403,16 @@ class JobStore:
                 SYSTEMONE.unload()
             except Exception:  # noqa: BLE001
                 log.exception("could not release the decision lane")
+            # HyperQwen wants the whole card, so a job stops it outright.
+            # Unlike ninfer it is not auto-restored: the owner chose to
+            # run it, and bringing a container back is their call.
+            try:
+                from .hyperqwen import HYPERQWEN  # noqa: PLC0415
+                if HYPERQWEN.running:
+                    log.info("stopping HyperQwen for job %s", job.job_id)
+                    HYPERQWEN.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("could not release the HyperQwen engine")
 
         def progress(frac: float, stage: str, step: Optional[int] = None,
                      steps_total: Optional[int] = None) -> None:

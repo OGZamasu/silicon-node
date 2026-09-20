@@ -34,6 +34,12 @@ DEFAULTS: dict[str, dict] = {
                       "flux2_steps": 28, "flux2_guidance": 4.0},
     "portrait-animate": {},
     "talking-head": {},
+    # The HyperQwen chat engine (patched vLLM in Docker). Off by default:
+    # a 9.5 GB image plus a one-time ~20 GB requantization, and it wants
+    # the whole card. Knobs mirror the project's own .env.
+    "hyperqwen": {"enabled": False, "mode": "single", "spec": "dflash2",
+                  "context": "fast", "prefix_cache": True,
+                  "dflash_tokens": 0, "gpu_util": 0.93},
 }
 
 

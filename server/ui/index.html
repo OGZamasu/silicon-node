@@ -442,6 +442,11 @@ a.dl:hover { text-decoration: underline; }
       yet — search Hugging Face above; any GGUF you download lands here and
       loads through llama.cpp, exactly like the Mac.</div></div>
   </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-title"><svg viewBox="0 0 16 16" fill="none"><path d="M2 4.5l6-3 6 3v7l-6 3-6-3v-7z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 8l6-3.5M8 8L2 4.5M8 8v6.5" stroke="currentColor" stroke-width="1.2"/></svg>
+      HyperQwen (patched vLLM)</div>
+    <div id="hq-body" class="imgout" style="font-size:12px">—</div>
+  </div>
   </div>
 </div>
 
@@ -1289,6 +1294,89 @@ function renderGguf() {
   if (rows.length) $("#gguf-rows").innerHTML = rows.join("");
 }
 
+/* ---------- HyperQwen: the optional third chat engine ---------- */
+let HQ = null;
+async function pollHyperqwen() {
+  try { HQ = await j("/v1/hyperqwen"); } catch { HQ = null; }
+  renderHyperqwen();
+}
+function renderHyperqwen() {
+  const el = $("#hq-body");
+  if (!el) return;
+  if (el.contains(document.activeElement)) return;   // mid-edit
+  if (!HQ) { el.innerHTML = `<div class="empty">—</div>`; return; }
+  const s = HQ.settings || {};
+  const sel = (name, opts, cur) =>
+    `<select data-hq="${name}">${opts.map(o =>
+      `<option${o === cur ? " selected" : ""}>${o}</option>`).join("")}</select>`;
+  const dot = HQ.running ? "ok" : HQ.enabled ? "warn" : "no";
+  let line;
+  if (!HQ.enabled) line = "switched off — the most expensive engine here: "
+    + "a 9.5 GB image, a one-time ~20 GB requantization, and it wants the "
+    + "whole card.";
+  else if (!HQ.docker?.ready) line = esc(HQ.docker?.detail || "Docker is not ready.");
+  else if (HQ.install) line = `<span class="spin"></span>${esc(HQ.install.stage)}`
+    + (HQ.install.error ? ` — <span class="err">${esc(HQ.install.error)}</span>` : "");
+  else if (!HQ.installed) line = "not installed yet.";
+  else if (HQ.running) line = `serving ${esc(HQ.model)} in <b>${esc(HQ.mode)}</b> `
+    + `mode on :${HQ.port}` + (HQ.uptime_s ? ` · up ${hms(HQ.uptime_s)}` : "");
+  else line = "installed, not running." + (HQ.container ? ` (${esc(HQ.container)})` : "");
+  const acts = [];
+  if (!HQ.enabled) acts.push(`<button class="primary" onclick="hqEnable(true)">Turn on</button>`);
+  else {
+    if (!HQ.installed && !HQ.install)
+      acts.push(`<button class="primary" onclick="hqCall('/v1/hyperqwen/install', this)">Install</button>`);
+    if (HQ.installed && !HQ.running)
+      acts.push(`<button class="primary" onclick="hqCall('/v1/hyperqwen/start', this)">Load — replaces the running chat engine</button>`);
+    if (HQ.running)
+      acts.push(`<button onclick="hqCall('/v1/hyperqwen/stop', this)">Unload</button>`);
+    acts.push(`<button onclick="hqEnable(false)">Turn off</button>`);
+  }
+  el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span class="dot ${dot}"></span><span>${line}</span></div>
+    ${HQ.enabled ? `<div class="kv"><span class="k">Mode</span><span class="v">
+      ${sel("mode", HQ.modes || [], s.mode)}
+      <span class="num" style="margin-left:8px">single = one chatter (127 tok/s); batch = many at once (~1,035 aggregate)</span></span></div>
+    <div class="kv"><span class="k">Context</span><span class="v">
+      ${sel("context", HQ.contexts || [], s.context)}
+      <span class="num" style="margin-left:8px">fast ~64k · long ~150k · huge ~240k</span></span></div>
+    <div class="kv"><span class="k">Speculation</span><span class="v">
+      ${sel("spec", HQ.specs || [], s.spec)}</span></div>
+    <div class="kv"><span class="k"></span><span class="v">
+      <button onclick="hqSave(this)">Save settings</button>
+      <span class="num" id="hq-saved" style="margin-left:8px"></span></span></div>` : ""}
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">${acts.join("")}</div>`;
+}
+async function hqEnable(on) {
+  try { await j("/v1/capabilities/hyperqwen", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings: { enabled: on } }) }); }
+  catch (e) { alert(String(e).slice(0, 220)); }
+  pollHyperqwen();
+}
+async function hqSave(btn) {
+  const settings = {};
+  document.querySelectorAll("[data-hq]").forEach(s =>
+    settings[s.dataset.hq] = s.value);
+  const note = $("#hq-saved");
+  try {
+    await j("/v1/capabilities/hyperqwen", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings }) });
+    if (note) note.textContent = "saved — takes effect on the next load";
+  } catch (e) { if (note) note.textContent = String(e).slice(0, 80); }
+  pollHyperqwen();
+}
+async function hqCall(path, btn) {
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spin"></span>working`;
+  try { await j(path, { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}" }); }
+  catch (e) { alert(String(e).slice(0, 300)); }
+  pollHyperqwen(); poll();
+}
+
 /* ---------- images (local text-to-image lane, hub 136) ---------- */
 let IMG_JOB = null;
 async function imgGo() {
@@ -1827,6 +1915,9 @@ route();
 poll();
 pollStore();
 setInterval(pollStore, 15000);
+// Slower than the 2.5 s status poll: each call shells out to docker.
+pollHyperqwen();
+setInterval(pollHyperqwen, 15000);
 </script>
 </body>
 </html>

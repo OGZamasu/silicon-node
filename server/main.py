@@ -606,6 +606,32 @@ def _decisions_status() -> dict:
                 "error": f"{type(exc).__name__}"}
 
 
+def _stop_hyperqwen_if_running() -> None:
+    """One language engine per card. Cheap when the engine was never
+    installed, so the other two lanes can always call it."""
+    try:
+        from .hyperqwen import HYPERQWEN  # noqa: PLC0415
+        if HYPERQWEN.checked_out and HYPERQWEN.running:
+            log.info("stopping HyperQwen to free the card")
+            HYPERQWEN.stop()
+    except Exception:  # noqa: BLE001
+        log.exception("could not stop the HyperQwen engine")
+
+
+def _hyperqwen_status() -> dict:
+    """Never let a docker probe take the advertisement down."""
+    try:
+        from .hyperqwen import HYPERQWEN  # noqa: PLC0415
+        st = HYPERQWEN.status()
+        # The advertisement is polled every 2.5 s by the dashboard; keep
+        # it to what a peer needs to decide, not the whole status page.
+        return {k: st[k] for k in ("engine", "enabled", "installed",
+                                   "running", "mode", "port", "model")}
+    except Exception as exc:  # noqa: BLE001
+        return {"engine": "hyperqwen", "enabled": False, "running": False,
+                "error": f"{type(exc).__name__}"}
+
+
 def _video_ready() -> bool:
     from . import video
     return video.ENGINE.ready()
@@ -752,7 +778,13 @@ async def capability_update(cap_id: str, request: Request):
     body = await request.json()
     ignored = CAPS.update(cap_id, body.get("enabled"),
                           body.get("settings"))
-    entry = next(c for c in capability_list() if c["id"] == cap_id)
+    # Some configurable ids are engines rather than job capabilities
+    # (hyperqwen), so they carry settings without appearing in the
+    # advertised capability list — report their settings instead.
+    entry = next((c for c in capability_list() if c["id"] == cap_id), None)
+    if entry is None:
+        entry = {"id": cap_id, "enabled": CAPS.enabled(cap_id),
+                 "settings": CAPS.settings(cap_id)}
     out = {"ok": True, "capability": entry}
     if ignored:
         out["warning"] = ("These setting keys are not exposed on this "
@@ -1233,15 +1265,21 @@ async def chat_completions_proxy(request: Request):
     of the engine port; the engine ports keep working unchanged."""
     import uuid  # noqa: PLC0415
     from .llamacpp import LLAMACPP, PORT as GGUF_PORT  # noqa: PLC0415
+    from .hyperqwen import HYPERQWEN, PORT as HQ_PORT  # noqa: PLC0415
     if LLM.running:
         port = LLM_PORT
     elif LLAMACPP.running:
         port = GGUF_PORT
+    elif HYPERQWEN.running:
+        # Same OpenAI surface, one more port; members reach it through
+        # this route exactly like the other two.
+        port = HQ_PORT
     else:
         raise HTTPException(
             status_code=503,
             detail="No chat engine is running — start one via "
-                   "/v1/llm/start or /v1/gguf/start.")
+                   "/v1/llm/start, /v1/gguf/start or "
+                   "/v1/hyperqwen/start.")
     role = _role(request)
     if role not in ("admin", "node"):
         from .serving import SERVING  # noqa: PLC0415
@@ -1337,6 +1375,7 @@ async def llm_start(request: Request):
     def _switch():
         if LLM.running:
             LLM.stop()  # switching model/profile/context
+        _stop_hyperqwen_if_running()
         pipeline.ENGINE.unload()
         LLM.start(profile, model_file=model_file,
                   context_length=context_length)
@@ -1731,6 +1770,7 @@ async def gguf_start(request: Request):
     def _switch():
         if LLM.running:
             LLM.stop()  # one language engine at a time on this card
+        _stop_hyperqwen_if_running()
         pipeline.ENGINE.unload()
         ctx = body.get("context")
         LLAMACPP.start(body.get("file", ""),
@@ -1750,6 +1790,59 @@ def gguf_stop(request: Request):
     from .llamacpp import LLAMACPP
     LLAMACPP.stop()
     return LLAMACPP.status()
+
+
+@app.get("/v1/hyperqwen")
+def hyperqwen_status():
+    from .hyperqwen import HYPERQWEN
+    return HYPERQWEN.status()
+
+
+@app.post("/v1/hyperqwen/install")
+def hyperqwen_install(request: Request):
+    """Clone the checkout and pull the 9.5 GB image. The one-time ~20 GB
+    requantization happens inside the container on first start."""
+    _require_operator(request, "Installing the HyperQwen engine")
+    from .hyperqwen import HYPERQWEN
+    ok, detail = HYPERQWEN.docker_ready()
+    if not ok:
+        raise HTTPException(status_code=503, detail=detail)
+    HYPERQWEN.install_async()
+    return HYPERQWEN.status()
+
+
+@app.post("/v1/hyperqwen/start")
+async def hyperqwen_start(request: Request):
+    _require_operator(request, "Starting the HyperQwen engine")
+    from .hyperqwen import HYPERQWEN
+    body = {}
+    with contextlib.suppress(Exception):
+        body = await request.json()
+    if STORE.queue_depth() > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="A GPU job is queued or running; this engine wants the "
+                   "whole card. Try again when the queue drains.")
+
+    def _switch():
+        pipeline.ENGINE.unload()
+        from .systemone import SYSTEMONE  # noqa: PLC0415
+        SYSTEMONE.unload()
+        HYPERQWEN.start(body.get("mode"))
+    try:
+        # The first start requantizes the model: minutes, not seconds.
+        await asyncio.to_thread(_switch)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from None
+    return HYPERQWEN.status()
+
+
+@app.post("/v1/hyperqwen/stop")
+async def hyperqwen_stop(request: Request):
+    _require_operator(request, "Stopping the HyperQwen engine")
+    from .hyperqwen import HYPERQWEN
+    await asyncio.to_thread(HYPERQWEN.stop)
+    return HYPERQWEN.status()
 
 
 @app.post("/v1/llm/models/download")
@@ -1829,6 +1922,9 @@ def node():
         # The decision lane, so the Mac's Decisions panel can choose
         # between its own laya-mlx lane and this GPU one.
         "decisions": _decisions_status(),
+        # The optional third chat engine, so the swarm can see it exists
+        # and whether it is the one currently serving.
+        "hyperqwen": _hyperqwen_status(),
         "llm": {
             "running": LLM.running,
             "model": getattr(LLM, "model_id", LLM_MODEL_ID)
