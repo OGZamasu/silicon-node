@@ -396,6 +396,13 @@ class JobStore:
         from . import pipeline as _pipeline  # noqa: PLC0415
         if job.capability != "store-install":
             LLM.preempt_for_job()
+            # The decision lane yields the card to real GPU work; it
+            # rebuilds itself on the next decision.
+            try:
+                from .systemone import SYSTEMONE  # noqa: PLC0415
+                SYSTEMONE.unload()
+            except Exception:  # noqa: BLE001
+                log.exception("could not release the decision lane")
 
         def progress(frac: float, stage: str, step: Optional[int] = None,
                      steps_total: Optional[int] = None) -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import shutil
 import subprocess
@@ -594,6 +595,17 @@ def _installed_video_models() -> list[str]:
     return out
 
 
+def _decisions_status() -> dict:
+    """Never let a broken decision lane take the advertisement down —
+    the Mac reads /v1/node to find every other capability too."""
+    try:
+        from .systemone import SYSTEMONE  # noqa: PLC0415
+        return SYSTEMONE.status()
+    except Exception as exc:  # noqa: BLE001
+        return {"engine": "laya", "available": False,
+                "error": f"{type(exc).__name__}"}
+
+
 def _video_ready() -> bool:
     from . import video
     return video.ENGINE.ready()
@@ -1156,6 +1168,60 @@ def _require_operator(request: Request, what: str) -> None:
 @app.get("/v1/llm")
 def llm_status():
     return LLM.status()
+
+
+@app.post("/v1/systemone")
+async def systemone_decide(request: Request):
+    """Typed decisions on the GPU — the node's System One lane (Laya).
+
+    Same wire shape the Mac and TypeSafe already speak, so the Decisions
+    panel can pick this lane over its own without a second decoder:
+    {state, model?, questions:{id:{type, instructions, criteria?}}}.
+    Members may decide (it is a service like chat, not an operator
+    action); the bearer is required off-box like every /v1/ route, and
+    the state's text is never logged."""
+    from .systemone import (  # noqa: PLC0415
+        DecisionError, MAX_BODY_BYTES, SYSTEMONE, validate)
+    raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Request is {len(raw)} bytes; this node caps the "
+                   f"decision body at {MAX_BODY_BYTES}.")
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400,
+                            detail="Body must be JSON.") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400,
+                            detail="Body must be a JSON object.")
+    role = _role(request)
+    if role not in ("admin", "node"):
+        from .serving import SERVING  # noqa: PLC0415
+        if SERVING.paused:
+            raise HTTPException(status_code=503, detail=SERVING.refusal())
+        from .clients import CLIENTS  # noqa: PLC0415
+        CLIENTS.count_llm(_actor(request))
+    try:
+        model = validate(body.get("state"), body.get("questions"),
+                         body.get("model"))
+    except DecisionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    try:
+        # Off the event loop: a forward pass is ~30 ms of GPU work, and a
+        # cold build is seconds.
+        return await asyncio.to_thread(
+            SYSTEMONE.predict, body["state"], body["questions"], model)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    except Exception as exc:  # noqa: BLE001
+        # Never echo the state back in an error.
+        log.exception("decision failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"The decision engine failed: "
+                   f"{type(exc).__name__}") from None
 
 
 @app.post("/v1/chat/completions")
@@ -1760,6 +1826,9 @@ def node():
         "capabilities": capability_list(),
         "metrics": met,
         "queue": _queue_view(),
+        # The decision lane, so the Mac's Decisions panel can choose
+        # between its own laya-mlx lane and this GPU one.
+        "decisions": _decisions_status(),
         "llm": {
             "running": LLM.running,
             "model": getattr(LLM, "model_id", LLM_MODEL_ID)
@@ -1937,6 +2006,10 @@ def ui_asset(name: str):
 
 def create_app() -> FastAPI:
     config.ensure_dirs()
+    # Off by default: the decision lane builds on its first request so it
+    # costs no VRAM on a node nobody is deciding on.
+    from .systemone import SYSTEMONE  # noqa: PLC0415
+    SYSTEMONE.preload_async()
     STORE.register("image-to-mesh", pipeline.image_to_mesh)
     STORE.register("retopologize", pipeline.retopologize)
     from . import video

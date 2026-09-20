@@ -1,0 +1,24 @@
+# System One decision lane (POST /v1/systemone) — Laya on CUDA.
+#
+# Laya is Apache-2.0 for code AND weights (github.com/NandhaKishorM/laya).
+# It rides the torch/transformers already installed for the media lanes —
+# install those FIRST. transformers stays PINNED at 4.57.1 for TRELLIS.2;
+# laya only needs >=4.45, so there is no conflict. Install with that
+# constraint so a resolver cannot quietly move it:
+#
+#   printf 'torch==2.6.0\ntransformers==4.57.1\n' > /tmp/c.txt
+#   pip install -c /tmp/c.txt -r requirements-decisions.txt
+#
+laya==0.3.4
+
+# Checkpoint revisions are pinned in server/systemone.py (CHECKPOINTS) and
+# reported in /v1/node.decisions.checkpoints, so drift is visible:
+#   convaiinnovations/laya                 1c5edc17a7acd8701df6fc341c0d179f1c62c982
+#   convaiinnovations/laya-multilingual    052592a15d198d9ad47da779604259b10b47b7aa
+#   convaiinnovations/laya-typed-decisions f9ab0b228f0fc0f14d873dbc99038f135c2da1b2
+#
+# Measured on this node (RTX 3090 Ti, torch 2.6.0+cu124, laya 0.3.4):
+#   all three checkpoints resident   ~4.5 GiB VRAM
+#   cold build (weights cached)      ~12 s   (~124 s including download)
+#   1 question                       ~32 ms
+#   3 questions (one forward pass)   ~32 ms  -> ~11 ms/question
