@@ -9,6 +9,9 @@ engine on the card.
 
 from __future__ import annotations
 
+import time
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -101,6 +104,7 @@ def test_an_unknown_mode_is_refused(local, monkeypatch):
     monkeypatch.setattr(hyperqwen.HyperQwenManager, "checked_out", True)
     monkeypatch.setattr(hyperqwen.HYPERQWEN, "image_present",
                         lambda: True)
+    monkeypatch.setattr(hyperqwen.HYPERQWEN, "prepared", lambda: True)
     monkeypatch.setattr(hyperqwen.HYPERQWEN, "write_env", lambda: {})
     r = local.post("/v1/hyperqwen/start", json={"mode": "turbo"})
     assert r.status_code == 500
@@ -221,3 +225,52 @@ def test_status_needs_a_token_off_box(tokens):
     ok = c.get("/v1/hyperqwen",
                headers={"Authorization": f"Bearer {tokens['member']}"})
     assert ok.status_code == 200
+
+
+def test_install_covers_model_preparation_not_just_the_image(monkeypatch,
+                                                             tmp_path):
+    """The ~19.5 GB preparation belongs to install, not to start: a start
+    that blocked on it would sit there for tens of minutes with nothing
+    to show, which is exactly what compose does if you let it."""
+    monkeypatch.setattr(hyperqwen, "CHECKOUT", tmp_path)
+    (tmp_path / "docker-compose.yml").write_text("{}")
+    monkeypatch.setattr(hyperqwen.HYPERQWEN, "image_present", lambda: True)
+    monkeypatch.setattr(hyperqwen.HYPERQWEN, "prepared", lambda: False)
+    # docker.exe only sees mounted drives, so _compose_argv refuses a
+    # scratch path — that rule has its own test below.
+    monkeypatch.setattr(hyperqwen, "_compose_argv",
+                        lambda *a: ["docker", "compose", *a])
+    ran: list[list[str]] = []
+
+    def fake_run(argv, timeout=120.0):
+        ran.append(argv)
+        import subprocess as sp
+        return sp.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(hyperqwen, "_run", fake_run)
+    hyperqwen.HYPERQWEN.install_state = None
+    hyperqwen.HYPERQWEN.install_async()
+    for _ in range(50):
+        if any("prepare" in a for argv in ran for a in argv):
+            break
+        time.sleep(0.1)
+    assert any("prepare" in a for argv in ran for a in argv), ran
+
+
+def test_an_unprepared_model_counts_as_not_installed(monkeypatch, tmp_path):
+    monkeypatch.setattr(hyperqwen, "CHECKOUT", tmp_path)
+    (tmp_path / "docker-compose.yml").write_text("{}")
+    monkeypatch.setattr(hyperqwen.HYPERQWEN, "image_present", lambda: True)
+    monkeypatch.setattr(hyperqwen.HYPERQWEN, "prepared", lambda: False)
+    assert hyperqwen.HYPERQWEN.installed() is False
+    monkeypatch.setattr(hyperqwen.HYPERQWEN, "prepared", lambda: True)
+    assert hyperqwen.HYPERQWEN.installed() is True
+
+
+def test_a_checkout_windows_cannot_see_is_refused_in_words(monkeypatch):
+    """docker.exe runs on Windows; a path inside the distro is invisible
+    to it, so say that rather than raising a path-conversion error."""
+    if not hyperqwen.hostos.IS_WSL:
+        pytest.skip("only meaningful on the WSL node")
+    monkeypatch.setattr(hyperqwen, "CHECKOUT", Path("/opt/silicon/hq"))
+    with pytest.raises(RuntimeError, match="Windows cannot see"):
+        hyperqwen._compose_argv("ps")

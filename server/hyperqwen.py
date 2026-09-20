@@ -84,7 +84,19 @@ def enabled() -> bool:
 
 def _compose_argv(*args: str) -> list[str]:
     """docker compose, run from the checkout, as the ENGINE sees paths."""
-    cwd = hostos.win_path(CHECKOUT) if hostos.IS_WSL else str(CHECKOUT)
+    if hostos.IS_WSL:
+        try:
+            cwd = hostos.win_path(CHECKOUT)
+        except ValueError:
+            # docker.exe runs on Windows and cannot see the distro's own
+            # filesystem, so the checkout has to live on a mounted drive.
+            raise RuntimeError(
+                f"The HyperQwen checkout is at {CHECKOUT}, which Windows "
+                "cannot see. On this node it must sit under a mounted "
+                "drive (/mnt/...) — set SILICON_NODE_HYPERQWEN_DIR to one."
+            ) from None
+    else:
+        cwd = str(CHECKOUT)
     return [DOCKER, "compose", "--project-directory", cwd,
             "-f", f"{cwd}\\docker-compose.yml" if hostos.IS_WSL
             else f"{cwd}/docker-compose.yml", *args]
@@ -134,15 +146,36 @@ class HyperQwenManager:
         except Exception:  # noqa: BLE001
             return False
 
+    def prepared(self) -> bool:
+        """The one-time model preparation downloads a ~19.5 GB W4A16
+        checkpoint into ./models. Anything much smaller means it is still
+        in flight or never ran."""
+        models = CHECKOUT / "models"
+        if not models.is_dir():
+            return False
+        total = 0
+        for p in models.rglob("*"):
+            try:
+                if p.is_file() and not p.is_symlink():
+                    total += p.stat().st_size
+            except OSError:
+                continue
+            if total > 15 * 1024**3:
+                return True
+        return False
+
     def installed(self) -> bool:
-        return self.checked_out and self.image_present()
+        return self.checked_out and self.image_present() and self.prepared()
 
     # -- install -----------------------------------------------------------
 
     def install_async(self) -> None:
-        """Clone the checkout and pull the 9.5 GB image. The one-time
-        ~20 GB requantization happens on first start, inside the
-        container, because that is where the project does it."""
+        """Everything that must happen before the engine can serve, in
+        one background job: the checkout, the 9.5 GB image, and the
+        one-time model preparation (~19.5 GB of W4A16 weights). Model
+        prep belongs here and not in start(): it is tens of minutes of
+        downloading, and compose's `up` would otherwise sit blocked on
+        the dependency with nothing to show for it."""
         if self.install_state and not self.install_state.get("error"):
             return
         self.install_state = {"stage": "starting", "error": None}
@@ -159,14 +192,28 @@ class HyperQwenManager:
                                 str(CHECKOUT)], timeout=600)
                     if out.returncode != 0:
                         raise RuntimeError(out.stderr[-200:] or "clone failed")
-                self.install_state = {"stage": "pulling the image (9.5 GB)",
-                                      "error": None}
-                out = _run(_compose_argv("--profile", "single", "pull"),
-                           timeout=7200)
-                if out.returncode != 0 and not self.image_present():
-                    raise RuntimeError(out.stderr[-200:] or "pull failed")
+                self.write_env()
+                if not self.image_present():
+                    self.install_state = {
+                        "stage": "pulling the image (9.5 GB)", "error": None}
+                    out = _run(_compose_argv("--profile", "single", "pull"),
+                               timeout=7200)
+                    if out.returncode != 0 and not self.image_present():
+                        raise RuntimeError(out.stderr[-200:] or "pull failed")
+                if not self.prepared():
+                    self.install_state = {
+                        "stage": "preparing the model (~19.5 GB, once)",
+                        "error": None}
+                    # The project's own one-shot: downloads and lays out
+                    # the W4A16 checkpoint under ./models.
+                    out = _run(_compose_argv("run", "--rm", "prepare"),
+                               timeout=14400)
+                    if out.returncode != 0 and not self.prepared():
+                        raise RuntimeError(
+                            (out.stderr or out.stdout)[-200:]
+                            or "model preparation failed")
                 self.install_state = None
-                log.info("HyperQwen installed")
+                log.info("HyperQwen installed and prepared")
             except Exception as exc:  # noqa: BLE001
                 msg = f"{type(exc).__name__}: {exc}"[:200]
                 self.install_state = {"stage": "failed", "error": msg}
@@ -249,10 +296,11 @@ class HyperQwenManager:
             ok, detail = self.docker_ready()
             if not ok:
                 raise RuntimeError(detail)
-            if not self.checked_out or not self.image_present():
+            if not self.installed():
                 self.install_async()
                 raise RuntimeError(
-                    "HyperQwen is installing (a 9.5 GB image) — watch the "
+                    "HyperQwen is installing — a 9.5 GB image and a "
+                    "one-time ~19.5 GB model preparation. Watch the "
                     "Models page and load it again when it lands.")
             mode = (mode or str(_settings()["mode"])).lower()
             if mode not in MODES:
@@ -268,7 +316,11 @@ class HyperQwenManager:
                 LLAMACPP.stop()
             self._down_all()
             log.info("starting HyperQwen (%s mode) on :%d", mode, PORT)
-            out = _run(_compose_argv("--profile", mode, "up", "-d"),
+            # --no-deps: preparation already ran during install, and
+            # without this compose blocks `up` on the prepare service's
+            # completion condition rather than returning.
+            out = _run(_compose_argv("--profile", mode, "up", "-d",
+                                     "--no-deps", mode),
                        timeout=900)
             if out.returncode != 0:
                 self.last_error = (out.stderr or out.stdout)[-300:]
