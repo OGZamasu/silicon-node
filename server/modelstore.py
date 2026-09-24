@@ -194,6 +194,13 @@ def _cache_volume() -> str:
     return str(p)
 
 
+def _windows_volume() -> str:
+    """A path on the Windows drive that holds the node (and, per the
+    setup guide, the distro's disk image): the drive of WIN_HOME."""
+    from .hostos import WIN_HOME  # noqa: PLC0415
+    return "/".join(WIN_HOME.parts[:3])  # /mnt/<drive>
+
+
 def listing() -> dict:
     guest = shutil.disk_usage(_cache_volume())
     out = {"disk_free_bytes": guest.free,
@@ -204,7 +211,7 @@ def listing() -> dict:
         try:
             # The VHDX grows on the Windows drive; show that budget too.
             out["disk_free_windows_bytes"] = (
-                shutil.disk_usage("/mnt/f").free)
+                shutil.disk_usage(_windows_volume()).free)
         except OSError:
             pass
     for mid, entry in _catalog().items():
@@ -237,7 +244,7 @@ def disk_refusal(entry: dict) -> str | None:
     if not IS_WSL:
         return None
     try:
-        host_free = shutil.disk_usage("/mnt/f").free
+        host_free = shutil.disk_usage(_windows_volume()).free
     except OSError:
         return None
     if host_free - need < HOST_RESERVE:

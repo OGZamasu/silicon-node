@@ -2171,9 +2171,9 @@ def _gpu_profile() -> dict:
             break
     try:
         import shutil as _sh
-        from .hostos import IS_WSL as _wsl  # noqa: PLC0415
+        from .hostos import IS_WSL as _wsl, WIN_HOME as _win_home  # noqa: PLC0415
         prof["disk_free_gb"] = round(
-            _sh.disk_usage("/mnt/f" if _wsl else "/").free / 1e9)
+            _sh.disk_usage(_win_home if _wsl else "/").free / 1e9)
     except OSError:
         pass
     return prof

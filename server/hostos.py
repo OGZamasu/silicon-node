@@ -45,6 +45,17 @@ else:
     IS_WSL = _detect_wsl()
 MODE = "windows-wsl2" if IS_WSL else "linux"
 
+# WSL only: where the Windows side keeps what the node runs there, as this
+# distro sees it — WIN_HOME holds the Windows checkout (whose runtime/ has
+# the engines) and ninfer; WIN_MODELS is the model library (GGUFs, chat
+# templates). Machine-specific, so never in the source: the install writes
+# them into /opt/silicon/secrets.env (docs/PROVISIONING.md, section 7).
+# Each engine's own *_DIR variable still wins over these.
+WIN_HOME = Path(os.environ.get("SILICON_NODE_WIN_HOME", "/mnt/c/SiliconNode"))
+WIN_MODELS = Path(os.environ.get("SILICON_NODE_WIN_MODELS",
+                                 str(WIN_HOME / "models")))
+WIN_RUNTIME = WIN_HOME / "silicon-node" / "runtime"
+
 _WIN_CURL = "/mnt/c/Windows/System32/curl.exe"
 
 

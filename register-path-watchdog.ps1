@@ -13,7 +13,7 @@
 #    netsh portproxy and restarting the IP Helper / Tailscale services.
 #  - It runs a COPY in %ProgramData%\SiliconNode, which only SYSTEM and
 #    Administrators may change. The checkout is writable by ordinary users
-#    and by the node's own process through /mnt/f; an elevated task running
+#    and by the node's own process through /mnt/<drive>; an elevated task running
 #    a script from there would run whatever last edited it. The log lives
 #    in the same protected folder.
 # Pure ASCII on purpose: Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI.

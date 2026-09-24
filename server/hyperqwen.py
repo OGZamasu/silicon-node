@@ -40,7 +40,7 @@ REPO = "https://github.com/syv-ai/HyperQwen"
 # is gitignored — they are installed artifacts, not source.
 CHECKOUT = Path(os.environ.get(
     "SILICON_NODE_HYPERQWEN_DIR",
-    "/mnt/f/Windows Silicon Optimizer/silicon-node/runtime/hyperqwen"
+    str(hostos.WIN_RUNTIME / "hyperqwen")
     if hostos.IS_WSL else "/opt/silicon/hyperqwen"))
 DOCKER = os.environ.get(
     "SILICON_NODE_DOCKER",

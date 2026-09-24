@@ -27,7 +27,7 @@ from . import hostos  # noqa: E402 (after the logger it configures)
 PORT = int(os.environ.get("SILICON_NODE_GGUF_PORT", "8082"))
 ENGINE_DIR = Path(os.environ.get(
     "SILICON_NODE_LLAMACPP_DIR",
-    "/mnt/f/Windows Silicon Optimizer/silicon-node/runtime/llamacpp"
+    str(hostos.WIN_RUNTIME / "llamacpp")
     if hostos.IS_WSL else "/opt/silicon/llamacpp"))
 # PrismML's llama.cpp fork, for Ternary Bonsai 2's PTQ1_0/PQ2_0 packings —
 # stock builds refuse those files outright. Same layout as the stock
@@ -37,13 +37,13 @@ PRISM_ENGINE_DIR = Path(os.environ.get(
 PRISM_REPO = "PrismML-Eng/llama.cpp"
 GGUF_DIR = Path(os.environ.get(
     "SILICON_NODE_GGUF_DIR",
-    "/mnt/f/ai-model-cache/gguf"
+    str(hostos.WIN_MODELS / "gguf")
     if hostos.IS_WSL else "/opt/silicon/models/gguf"))
 _EXE = "llama-server.exe" if hostos.IS_WSL else "llama-server"
 
 
 def _path_arg(p: Path) -> str:
-    r"""A path as the ENGINE must see it (F:\... through interop on WSL,
+    r"""A path as the ENGINE must see it (X:\... through interop on WSL,
     the POSIX path itself on Linux)."""
     return hostos.win_path(p) if hostos.IS_WSL else str(p)
 
@@ -147,7 +147,7 @@ SHARP_REPO = "peculiar-ragdoll/Qwen-Sharp-Chat-Templates"
 SHARP_FILE = "chat_template.jinja"
 TEMPLATE_DIR = Path(os.environ.get(
     "SILICON_NODE_TEMPLATE_DIR",
-    "/mnt/f/ai-model-cache/chat-templates"
+    str(hostos.WIN_MODELS / "chat-templates")
     if hostos.IS_WSL else "/opt/silicon/chat-templates"))
 SHARP_TEMPLATE = TEMPLATE_DIR / "qwen-sharp.jinja"
 
@@ -487,7 +487,7 @@ class LlamaCppManager:
                     and os.environ.get("SILICON_NODE_SHARP_TEMPLATE",
                                        "1") != "0"):
                 # As the engine sees it: F:\... through interop on
-                # WSL (the exe cannot open /mnt/f), POSIX on Linux.
+                # WSL (the exe cannot open /mnt/<drive>), POSIX on Linux.
                 args += ["--chat-template-file",
                          _path_arg(SHARP_TEMPLATE)]
                 self.sharp_active = True
@@ -543,7 +543,7 @@ class LlamaCppManager:
 
 
 class GGUFDownloads:
-    """HF GGUF downloads into the shared model library (F:\\ai-model-cache),
+    """HF GGUF downloads into the shared model library (GGUF_DIR),
     resumable, progress by file size — same pattern as the ninfer manager."""
 
     def __init__(self) -> None:

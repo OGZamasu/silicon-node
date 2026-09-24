@@ -77,7 +77,8 @@ too: the engine fetches itself on first use.
 
 1. On the Mac: **Silicon Optimizer → Swarm tab**, pair with the six-digit
    code.
-2. On this PC: run `save-swarm-token.ps1` and paste the token it gives you.
+2. On this PC: run `save-swarm-token.ps1 -PeerUrl <your Mac's swarm
+   address>` and paste the token it gives you.
 3. Restart the service. Your PC now has its own card in the Mac app —
    GPU meter, job queue, and controls.
 

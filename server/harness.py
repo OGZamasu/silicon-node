@@ -35,7 +35,7 @@ from . import hostos  # noqa: E402 (after the constants it reads)
 
 _RUNTIME = Path(os.environ.get(
     "SILICON_NODE_RUNTIME",
-    "/mnt/f/Windows Silicon Optimizer/silicon-node/runtime"
+    str(hostos.WIN_RUNTIME)
     if hostos.IS_WSL
     else str(Path(__file__).resolve().parent.parent / "runtime")))
 NODE_EXE = _RUNTIME / "node" / ("node.exe" if hostos.IS_WSL

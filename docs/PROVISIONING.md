@@ -146,6 +146,27 @@ systemctl daemon-reload && systemctl enable --now silicon-node
 `LimitNOFILE` is load-bearing: many-shard model loads exhaust the default
 1024 soft limit and the failure masquerades as a CUDA driver error.
 
+Then tell the service where the Windows side keeps things. The chat
+engines are Windows programs, so they live on a Windows drive, which the
+distro sees under `/mnt/<drive>`. Write your own paths into
+`/opt/silicon/secrets.env` (read at every start, never committed):
+
+```bash
+cat >> /opt/silicon/secrets.env <<'EOF'
+# The folder holding this repository's Windows checkout (its runtime/
+# gets the llama.cpp builds, the agent harness and HyperQwen) and ninfer.
+SILICON_NODE_WIN_HOME="/mnt/d/SiliconNode"
+# The model library: GGUFs and chat templates.
+SILICON_NODE_WIN_MODELS="/mnt/d/SiliconNode/models"
+# Only if ninfer isn't at $SILICON_NODE_WIN_HOME/ninfer:
+# NINFER_DIR="/mnt/d/SiliconNode/ninfer-3090/dist/ninfer-rtx3090-windows-x64-0.6.0-rtx3090"
+EOF
+```
+
+Unset, they default to `/mnt/c/SiliconNode` and its `models/` folder.
+Put the distro's disk image on the same drive: the model store checks
+that drive's free space before an install.
+
 Windows side: `install.ps1` adds the tray app to the Start menu and
 startup; `setup-lan-exposure.ps1` (run as admin) adds the LAN port proxy,
 firewall rule, and WSL keepalive if you want LAN access — with the swarm

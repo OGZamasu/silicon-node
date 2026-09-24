@@ -30,8 +30,7 @@ from . import hostos  # noqa: E402 (after the logger it configures)
 
 NINFER_DIR = Path(os.environ.get(
     "NINFER_DIR",
-    "/mnt/f/Windows Silicon Optimizer/ninfer-3090/dist/"
-    "ninfer-rtx3090-windows-x64-0.6.0-rtx3090"
+    str(hostos.WIN_HOME / "ninfer")
     if hostos.IS_WSL else "/opt/silicon/ninfer"))
 NINFER_EXE = NINFER_DIR / (
     "ninfer-serve.exe" if hostos.IS_WSL else "ninfer-serve")
@@ -46,7 +45,7 @@ AUTOSTART = os.environ.get("SILICON_NODE_LLM_AUTOSTART", "1") != "0"
 
 def _engine_path_arg(p: Path) -> str:
     r"""A path as the ENGINE must see it: on WSL the exe is a Windows
-    process and interop passes argv verbatim, so translate to F:\...;
+    process and interop passes argv verbatim, so translate to X:\...;
     on Linux the POSIX path is already the truth."""
     return hostos.win_path(p) if hostos.IS_WSL else str(p)
 

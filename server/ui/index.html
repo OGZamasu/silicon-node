@@ -1645,7 +1645,7 @@ function esc(t) {
   return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
-/* "sams-macbook · 100.99.135.89" — name from the client's own token when
+/* "sams-macbook · 100.64.0.9" — name from the client's own token when
    they used one; a proxied source IP is this PC's forwarder, not the
    sender, so it's labeled instead of shown as an address. */
 function submitterText(sb) {
@@ -1784,7 +1784,6 @@ function renderSettings() {
     ["This dashboard", location.origin + "/ui"],
     ["Service", location.origin.replace("/ui", "")],
     ["Language model API", llmBase() + "/v1  (OpenAI + Anthropic)"],
-    ["Memories hub", "https://memories.zamasu.dev/p/silicon-node"],
   ];
   $("#endpoints").innerHTML = rows.map(([k, v]) =>
     `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");

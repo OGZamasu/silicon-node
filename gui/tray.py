@@ -9,6 +9,7 @@ dashboard as a chromeless Edge app window.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -22,7 +23,9 @@ from PIL import Image, ImageDraw
 APP_NAME = "Silicon Node"
 NODE = "http://127.0.0.1:8790"
 UI = f"{NODE}/ui"
-HUB = "https://memories.zamasu.dev/p/silicon-node"
+# The owner's project hub, if they keep one — an environment setting,
+# since this repository is public; the menu item shows only when set.
+HUB = os.environ.get("SILICON_NODE_HUB_URL", "")
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 GREEN, AMBER, BLUE, RED = ("#43d17c", "#e0a458", "#7ba6e8", "#e06456")
@@ -117,7 +120,8 @@ def main() -> None:
             pystray.MenuItem("Open Silicon Node", open_dashboard,
                              default=True),
             pystray.MenuItem("Open Memories hub",
-                             lambda *_: webbrowser.open(HUB)),
+                             lambda *_: webbrowser.open(HUB),
+                             visible=bool(HUB)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Start when I sign in", toggle_autostart,
                              checked=lambda item: autostart_on()),

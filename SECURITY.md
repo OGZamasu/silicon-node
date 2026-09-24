@@ -49,7 +49,6 @@ enforces the same rule on its side.
   exceptions.
 - `/health` stays open so other machines can see the node is alive. It
   says nothing except name, version, uptime, and queue length.
-
 - **Members see only their own jobs.** A paired member's job list,
   job status, job detail and artifact downloads cover the jobs it
   submitted; the node owner and the swarm admin see everyone's. Someone
@@ -108,7 +107,7 @@ runs elevated. That makes *where the script lives* matter:
 - **It runs a copy in `%ProgramData%\SiliconNode`,** which the
   registration script locks to SYSTEM and Administrators (owner and
   ACL, checked after it sets them), with read-and-run for everyone else.
-  The checkout is writable by ordinary users and, through `/mnt/f`, by
+  The checkout is writable by ordinary users and, through `/mnt/<drive>`, by
   the node's own process; an elevated task running the checkout's copy
   would run whatever last edited it. Its log is kept in the same folder.
 - It probes `/health` only, which carries nothing but name, version,

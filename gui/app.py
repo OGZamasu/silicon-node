@@ -36,12 +36,14 @@ APP_NAME = "Silicon Node"
 VERSION = "0.2.0"
 NODE = os.environ.get("SILICON_NODE_URL", "http://127.0.0.1:8790")
 LLM_URL = os.environ.get("SILICON_NODE_LLM_URL", "http://127.0.0.1:8081")
-TAILNET_URL = "http://100.118.191.121:8790"
-LAN_URL = "http://192.168.4.23:8790"
-HUB_URL = "https://memories.zamasu.dev/p/silicon-node"
+# Machine-specific addresses come from the environment, never the source:
+# this repository is public. Unset ones are simply not shown.
+TAILNET_URL = os.environ.get("SILICON_NODE_TAILNET_URL", "")
+LAN_URL = os.environ.get("SILICON_NODE_LAN_URL", "")
+HUB_URL = os.environ.get("SILICON_NODE_HUB_URL", "")
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-NINFER_MODELS_DIR = Path(r"F:\Windows Silicon Optimizer\ninfer-3090\dist"
-                         r"\ninfer-rtx3090-windows-x64-0.6.0-rtx3090\models")
+NINFER_MODELS_DIR = Path(os.environ.get(
+    "SILICON_NODE_NINFER_MODELS", r"C:\SiliconNode\ninfer\models"))
 SWARM_JSON = Path(r"\\wsl$\SiliconNode\opt\silicon\swarm.json")
 
 # ---------------------------------------------------------------------------
@@ -934,8 +936,12 @@ class SettingsPage(QWidget):
                           ("Service (tailnet)", TAILNET_URL),
                           ("Service (LAN)", LAN_URL),
                           ("LLM OpenAI API", f"{LLM_URL}/v1"),
-                          ("LLM tailnet", "http://100.118.191.121:8081/v1"),
+                          ("LLM tailnet",
+                           TAILNET_URL.replace(":8790", ":8081") + "/v1"
+                           if TAILNET_URL else ""),
                           ("Memories hub", HUB_URL)):
+            if not val:
+                continue
             row = QHBoxLayout()
             row.addWidget(label(name, "muted"))
             row.addStretch(1)
@@ -1128,6 +1134,7 @@ class App:
         a1.triggered.connect(self._show)
         a2 = QAction("Open Memories hub")
         a2.triggered.connect(lambda: webbrowser.open(HUB_URL))
+        a2.setVisible(bool(HUB_URL))
         a3 = QAction("Quit")
         a3.triggered.connect(self.qt.quit)
         menu.addAction(a1)

@@ -7,7 +7,7 @@ const { app, BrowserWindow, Menu, Tray, nativeImage, shell } =
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
-const ICON = "F:/Windows Silicon Optimizer/silicon-node/server/ui/icon.png";
+const ICON = path.join(__dirname, "..", "..", "server", "ui", "icon.png");
 
 const NODE = "http://127.0.0.1:8790";
 const UI = NODE + "/ui";
@@ -43,7 +43,9 @@ function authed(url) {
   const t = swarmToken();
   return fetch(url, t ? { headers: { Authorization: `Bearer ${t}` } } : {});
 }
-const HUB = "https://memories.zamasu.dev/p/silicon-node";
+// The owner's project hub, if they keep one: an environment setting, since
+// this repository is public. The menu item appears only when it is set.
+const HUB = process.env.SILICON_NODE_HUB_URL || "";
 const COLORS = { idle: "#34c759", job: "#ff9500", llm: "#0a84ff",
                  down: "#ff453a" };
 
@@ -128,7 +130,8 @@ app.whenReady().then(() => {
   tray.setToolTip("Silicon Node");
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Open Silicon Node", click: createWindow },
-    { label: "Open Memories hub", click: () => shell.openExternal(HUB) },
+    { label: "Open Memories hub", visible: Boolean(HUB),
+      click: () => shell.openExternal(HUB) },
     { type: "separator" },
     { label: "Start when I sign in", type: "checkbox",
       checked: app.getLoginItemSettings().openAtLogin,
