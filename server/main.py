@@ -1865,39 +1865,6 @@ def llm_model_downloads():
     return DOWNLOADS.progress()
 
 
-@app.post("/v1/swarm/image")
-async def swarm_image(request: Request):
-    """Delegate image generation to a peer (the Mac's image-flux)."""
-    body = await request.json()
-    prompt = (body.get("prompt") or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="A prompt is required.")
-    if not config.PEERS or not config.SWARM_TOKEN:
-        raise HTTPException(
-            status_code=503,
-            detail="No swarm registry on this node (swarm.json).")
-    peer = config.PEERS[0]
-    import httpx  # noqa: PLC0415
-    try:
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(
-                f"{peer['base_url']}/v1/jobs",
-                json={"capability": "image-flux", "prompt": prompt},
-                headers={"Authorization":
-                         f"Bearer {config.SWARM_TOKEN}"})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not reach {peer.get('name')}: {exc}") from None
-    if r.status_code // 100 != 2:
-        raise HTTPException(
-            status_code=502,
-            detail=f"{peer.get('name')} answered {r.status_code}: the Mac "
-                   "hasn't exposed image jobs to the swarm yet (asked for "
-                   "on the hub).")
-    return {"peer": peer.get("name"), **r.json()}
-
-
 # ---------------------------------------------------------------------------
 # Phase 4 groundwork: node advertisement (read-only, no delegation yet)
 # ---------------------------------------------------------------------------

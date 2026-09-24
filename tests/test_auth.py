@@ -165,6 +165,22 @@ def test_unauthenticated_remote_never_reaches_an_operator_route(tokens):
         assert r.status_code == 401
 
 
+def test_nobody_can_make_the_node_spend_the_swarm_token_on_a_peer(
+        tokens, monkeypatch):
+    """/v1/swarm/image posted to a peer with the shared swarm secret on
+    any member's say-so (hub 160). Nothing called it; it is gone, and no
+    credential leaves the node on a caller's behalf."""
+    import httpx
+
+    def no_outbound(*a, **k):
+        raise AssertionError("the node made an outbound call")
+    monkeypatch.setattr(httpx.AsyncClient, "post", no_outbound)
+    for role in ("member", "swarm", "node"):
+        r = call(client(REMOTE), "post", "/v1/swarm/image",
+                 {"prompt": "a cat"}, tokens[role])
+        assert r.status_code in (404, 405), role
+
+
 def test_client_management_needs_the_admin_token(tokens):
     c = client(REMOTE)
     assert call(c, "get", "/swarm/clients", None, None).status_code == 401
