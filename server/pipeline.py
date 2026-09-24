@@ -299,7 +299,7 @@ def image_to_mesh(job: Job, progress: Progress) -> list[str]:
     """Phase-1 capability: image -> dense GLB + clean low-poly OBJ."""
     vert_num = _parse_vert_num(job.params)
     seed = _parse_seed(job.params)
-    image_path = Path(job.params["image_path"])
+    image_path = job.input_path("image_path")
     work = job.dir
 
     progress(0.05, "model-load")
@@ -317,7 +317,7 @@ def retopologize(job: Job, progress: Progress) -> list[str]:
     """Phase-2 capability: mesh in, clean low-poly mesh out (no densify)."""
     vert_num = _parse_vert_num(job.params)
     seed = _parse_seed(job.params)
-    mesh_path = Path(job.params["mesh_path"])
+    mesh_path = job.input_path("mesh_path")
 
     progress(0.05, "model-load")
     pred_obj = ENGINE.retopo(mesh_path, vert_num, seed, job.dir, progress,

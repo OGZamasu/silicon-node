@@ -34,8 +34,8 @@ def ready() -> bool:
 
 
 def portrait_animate(job: Job, progress) -> list[str]:
-    image = Path(job.params["image_path"])
-    driving = Path(job.params["driving_path"])
+    image = job.input_path("image_path")
+    driving = job.input_path("driving_path")
     out_dir = job.dir / "lp_out"
     out_dir.mkdir(parents=True, exist_ok=True)
 

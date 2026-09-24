@@ -42,6 +42,15 @@ LTX_UNCENSORED_FILE = os.environ.get(
 _lock = threading.RLock()  # the i2v branch unloads inside the lock
 
 
+def _start_image(job: Job):
+    """The job's start image as RGB, opened from the job's own folder
+    (Job.input_path). Never a string handed to diffusers' load_image,
+    which also fetches http(s) URLs (hub 154)."""
+    from PIL import Image, ImageOps  # noqa: PLC0415
+    with Image.open(job.input_path("image_path")) as im:
+        return ImageOps.exif_transpose(im).convert("RGB")
+
+
 class VideoEngine:
     def __init__(self) -> None:
         self._pipe = None
@@ -158,7 +167,6 @@ class VideoEngine:
             # TI2V's image-conditioned path (the Mac sends a start image
             # for image-to-video requests).
             from diffusers import WanImageToVideoPipeline  # noqa: PLC0415
-            from diffusers.utils import load_image  # noqa: PLC0415
             with _lock:
                 if getattr(self, "_pipe_i2v", None) is None:
                     self.unload()  # one Wan pipeline resident at a time
@@ -171,7 +179,7 @@ class VideoEngine:
                     else:
                         p.enable_model_cpu_offload()
                     self._pipe_i2v = p
-            kwargs["image"] = load_image(image_path)
+            kwargs["image"] = _start_image(job)
             result = self._pipe_i2v(**kwargs)
         else:
             self._ensure()
@@ -401,8 +409,7 @@ class VideoEngine:
         with _lock:
             pipe = self._ltx_uncensored_pipe(image_to_video=bool(image_path))
         if image_path:
-            from diffusers.utils import load_image  # noqa: PLC0415
-            kwargs["image"] = load_image(image_path)
+            kwargs["image"] = _start_image(job)
         progress(0.10, "video-denoise")
         result = pipe(**kwargs)
         job.receipts["ltx_denoise_s"] = round(time.time() - t0, 1)

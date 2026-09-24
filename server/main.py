@@ -1128,6 +1128,16 @@ def models_inventory():
     return {"models": models}
 
 
+# Where each capability that takes a file accepts it.
+_FILE_ROUTES = {
+    "image-to-mesh": "POST /v1/image-to-mesh (multipart image)",
+    "retopologize": "POST /v1/retopologize (multipart mesh)",
+    "portrait-animate": "POST /v1/portrait-animate (image_b64 + driving_b64)",
+    "talking-head": "POST /v1/talking-head (image_b64 + audio_b64)",
+    "text-to-video": "POST /v1/text-to-video (image_b64 for a start image)",
+}
+
+
 @app.post("/v1/jobs")
 async def submit_generic(request: Request):
     body = await request.json()
@@ -1139,16 +1149,23 @@ async def submit_generic(request: Request):
             detail=f"Unknown capability {cap!r}. This node offers: "
                    f"{', '.join(sorted(ids))}.")
     params = {k: v for k, v in body.items() if k != "capability"}
-    if cap == "image-to-mesh" and "image_path" not in params:
+    # A job param that names a file is only ever written by the server,
+    # into the job's own folder, from an upload (hub 154). Taken from a
+    # caller, it would make the node read any file it can see — and a
+    # URL there made the video lane fetch it.
+    named = sorted(k for k in params if k.endswith("_path"))
+    if named:
         raise HTTPException(
             status_code=400,
-            detail="image-to-mesh needs an image; use POST /v1/image-to-mesh "
-                   "(multipart) which accepts the file directly.")
-    if cap == "retopologize" and "mesh_path" not in params:
+            detail=f"{', '.join(named)}: files can't be named by path. "
+                   "Send them with the job instead"
+                   + (f" — {_FILE_ROUTES[cap]}." if cap in _FILE_ROUTES
+                      else "."))
+    if cap in _FILE_ROUTES and cap != "text-to-video":
         raise HTTPException(
             status_code=400,
-            detail="retopologize needs a mesh; use POST /v1/retopologize "
-                   "(multipart) which accepts the file directly.")
+            detail=f"{cap} needs an input file; use {_FILE_ROUTES[cap]}, "
+                   "which accepts it directly.")
     _require_enabled(cap)
     job = STORE.submit(cap, params)
     job.submitted_by = _submitter(request, cap)
@@ -1261,6 +1278,29 @@ async def systemone_decide(request: Request):
                    f"{type(exc).__name__}") from None
 
 
+def _fetchable_media(body) -> list[str]:
+    """Message parts carrying a URL the engine would fetch itself.
+
+    vLLM (HyperQwen) and llama-server fetch http(s) image/video/audio URLs
+    from the node's network; a member's chat must not make the node do
+    that (hub 154, the same SSRF the Mac closed in its own chat route).
+    Inline data: URLs are the only form accepted."""
+    found = []
+    messages = body.get("messages") if isinstance(body, dict) else None
+    for msg in messages if isinstance(messages, list) else ():
+        content = msg.get("content") if isinstance(msg, dict) else None
+        for part in content if isinstance(content, list) else ():
+            if not isinstance(part, dict):
+                continue
+            for key, val in part.items():
+                url = (val.get("url") if isinstance(val, dict)
+                       else val if key.endswith("url") else None)
+                if isinstance(url, str) and \
+                        not url.strip().lower().startswith("data:"):
+                    found.append(key)
+    return found
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions_proxy(request: Request):
     """The OpenAI chat surface THROUGH the node, so member usage is
@@ -1294,6 +1334,17 @@ async def chat_completions_proxy(request: Request):
         from .clients import CLIENTS  # noqa: PLC0415
         CLIENTS.count_llm(_actor(request))
     body = await request.body()
+    try:
+        parsed = json.loads(body or b"{}")
+    except ValueError:
+        parsed = None   # the engine answers a malformed body itself
+    remote = _fetchable_media(parsed)
+    if remote:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{', '.join(sorted(set(remote)))}: send media inline "
+                   "as a data: URL — this node does not fetch URLs on a "
+                   "caller's behalf.")
     stream = b'"stream": true' in body or b'"stream":true' in body
     from .hostos import bridge_curl_argv, chat_spool_dir  # noqa: PLC0415
     wsl_tmp = chat_spool_dir()

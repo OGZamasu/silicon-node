@@ -35,8 +35,8 @@ def ready() -> bool:
 
 
 def talking_head(job: Job, progress) -> list[str]:
-    image = Path(job.params["image_path"])
-    audio = Path(job.params["audio_path"])
+    image = job.input_path("image_path")
+    audio = job.input_path("audio_path")
     out_dir = job.dir / "st_out"
     out_dir.mkdir(parents=True, exist_ok=True)
 

@@ -57,6 +57,24 @@ class Job:
     def dir(self) -> Path:
         return config.JOBS_DIR / self.job_id
 
+    def input_path(self, key: str) -> Path:
+        """An input file this job was given (params[key]), as a path —
+        and only ever one inside this job's own directory (hub 154).
+
+        The server writes every *_path param itself, into job.dir, from
+        an upload. A path from anywhere else means a caller wrote it, and
+        opening it would hand them any file the node can read."""
+        raw = self.params.get(key)
+        if not raw:
+            raise ValueError(f"This job was given no {key.removesuffix('_path')} "
+                             "file.")
+        path = Path(str(raw)).resolve()
+        if not path.is_relative_to(self.dir.resolve()):
+            raise ValueError(
+                f"Refusing {key}: input files must be uploaded with the job, "
+                "not named by path.")
+        return path
+
     def to_api(self) -> dict[str, Any]:
         """Shape returned by GET /v1/jobs/{id}, matching the Mac client.
 
@@ -351,7 +369,28 @@ class JobStore:
         source = self.get(job_id)
         if source is None or source.state not in ("failed", "done"):
             return None
-        return self.submit(source.capability, dict(source.params))
+        params = dict(source.params)
+        job = self.submit(source.capability, params, defer=True)
+        job.submitted_by = source.submitted_by
+        # Inputs live in the source job's directory and handlers only open
+        # files inside their own (Job.input_path), so the retry gets its
+        # own copies. An input retention already swept makes the retry
+        # fail with that reason rather than point at another job's files.
+        for key, raw in source.params.items():
+            if not key.endswith("_path") or not raw:
+                continue
+            try:
+                src = source.input_path(key)
+                job.dir.mkdir(parents=True, exist_ok=True)
+                dest = job.dir / src.name
+                shutil.copyfile(src, dest)
+                params[key] = str(dest)
+            except (OSError, ValueError) as exc:
+                self.abandon(job, f"Cannot retry: the {key} input is gone "
+                                  f"({exc}).")
+                return job
+        self.enqueue(job)
+        return job
 
     # -- worker -----------------------------------------------------------
 
