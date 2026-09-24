@@ -1086,7 +1086,8 @@ def models_inventory():
 
     llm_status = LLM.status()
     for fname in llm_status.get("installed_models", []):
-        mid = LLM_MODEL_ID  # single-model engine today
+        # The id /v1/llm/start accepts back (as does the filename).
+        mid = LLM.model_id_for(fname)
         models.append({
             "id": mid, "name": f"{mid} (ninfer INT8)",
             "capability": "llm", "engine": "ninfer-3090",
@@ -1352,37 +1353,61 @@ def llm_models():
 
 @app.post("/v1/llm/start")
 async def llm_start(request: Request):
+    """Start or switch the chat model: {model?, model_file?, profile?,
+    context_length?}. Everything the request names is checked BEFORE the
+    serving model is touched — an unknown model is a 404 and the old one
+    keeps answering. A start that fails after the old model was stopped
+    puts the old model back."""
     _require_operator(request, "Starting or switching the chat model")
-    profile, model_file, context_length = "c1", None, None
+    from .llm import PROFILES as _PROFILES, UnknownModel  # noqa: PLC0415
     try:
         body = await request.json()
-        profile = body.get("profile", "c1")
-        model_file = body.get("model_file")
-        # The Mac's Swarm page sends the model ID, not a filename
-        # (handoff 127): "qwen3.8-27b" → qwen3_8_27b.ninfer.
-        if not model_file and body.get("model"):
-            stem = str(body["model"]).replace(".", "_").replace("-", "_")
-            model_file = f"{stem}.ninfer"
-        if body.get("context_length") is not None:
-            context_length = int(body["context_length"])
-    except (ValueError, TypeError):
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    profile = body.get("profile") or "c1"
+    if profile not in _PROFILES:
         raise HTTPException(
             status_code=400,
-            detail="context_length must be a number.") from None
-    except Exception:  # noqa: BLE001
-        pass
+            detail=f"Unknown profile {profile!r}; use one of "
+                   f"{', '.join(sorted(_PROFILES))}.")
+    context_length = None
+    if body.get("context_length") is not None:
+        try:
+            context_length = int(body["context_length"])
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail="context_length must be a number.") from None
+    try:
+        # The Mac sends the advertised id as `model` and the listed file
+        # as `model_file` (hub 156/162); older Macs sent the filename as
+        # `model`. All of them resolve here.
+        model_path = LLM.resolve_model(body.get("model"),
+                                       body.get("model_file"))
+    except UnknownModel as exc:
+        return JSONResponse(status_code=404, content={
+            "error": str(exc), "models": exc.choices})
     if STORE.queue_depth() > 0:
         raise HTTPException(
             status_code=409,
             detail="A GPU job is queued or running; the LLM will not start "
                    "until the job queue drains. Try again shortly.")
+
     def _switch():
-        if LLM.running:
+        was_serving = LLM.running
+        if was_serving:
             LLM.stop()  # switching model/profile/context
         _stop_hyperqwen_if_running()
         pipeline.ENGINE.unload()
-        LLM.start(profile, model_file=model_file,
-                  context_length=context_length)
+        try:
+            LLM.start(profile, model_file=model_path.name,
+                      context_length=context_length)
+        except (ValueError, RuntimeError) as exc:
+            if not was_serving:
+                raise
+            raise RuntimeError(f"{exc} — {LLM.fall_back()}.") from None
     try:
         # start() blocks up to ~3 min waiting healthy; on the event loop
         # that froze every route for the duration (hub 135).
@@ -1905,6 +1930,9 @@ def node():
             "max_concurrency":
                 _LLM_PROFILES[LLM._profile]["max_concurrency"]
             if LLM.running else None,
+            # Set when a start failed and nothing is serving: chat is
+            # down, not merely unloaded.
+            "error": None if LLM.running else LLM.last_error,
         },
         "peers": [{"name": p.get("name", "?"), "base_url": p["base_url"]}
                   for p in config.PEERS],

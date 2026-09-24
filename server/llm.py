@@ -107,19 +107,44 @@ def _load_contexts() -> dict:
         return {}
 
 
+def _norm_id(s: str) -> str:
+    """A model name with the spelling taken out: the filename stem says
+    qwen3_8_27b while the engine serves qwen3.8-27b."""
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
 def _ctx_lookup(model_id: str):
-    """Stored context for a model, tolerant of id spelling: the filename
-    stem says qwen3_8_27b while the engine serves qwen3.8-27b."""
+    """Stored context for a model, tolerant of id spelling."""
     data = _load_contexts()
     if model_id in data:
         return data[model_id]
-    def norm(s: str) -> str:
-        return "".join(ch for ch in s if ch.isalnum())
-    n = norm(model_id)
+    n = _norm_id(model_id)
     for k, v in data.items():
-        if norm(k) == n:
+        if _norm_id(k) == n:
             return v
     return None
+
+
+def installed_model_files() -> list[str]:
+    """Complete .ninfer files in the models folder. Downloads write
+    straight to their final name, so a partial file is there too — it is
+    smaller than any real model and is not listed."""
+    models_dir = NINFER_DIR / "models"
+    if not models_dir.is_dir():
+        return []
+    return sorted(p.name for p in models_dir.glob("*.ninfer")
+                  if p.stat().st_size > 10_000_000_000)
+
+
+class UnknownModel(LookupError):
+    """The requested chat model is not installed on this node."""
+
+    def __init__(self, asked: str, choices: list[str]) -> None:
+        self.choices = choices
+        listing = ", ".join(choices) if choices else "none"
+        super().__init__(
+            f"No installed ninfer model matches {asked!r}. Installed: "
+            f"{listing}.")
 
 
 def _store_context(model_id: str, ctx: int) -> None:
@@ -154,6 +179,13 @@ class LlmManager:
         self._expect_running = False   # armed by start(), cleared by stop()
         self._watchdog: threading.Thread | None = None
         self._last_watchdog_restart = 0.0
+        self._model_path: Path | None = None   # what the engine was given
+        # (profile, model file, context argument) of the last start that
+        # came up healthy — what the watchdog, the after-job restore and a
+        # failed switch bring back, so none of them silently swaps the
+        # owner's chosen model for the default.
+        self._last_good: tuple[str, str, int | None] | None = None
+        self.last_error: str | None = None      # why the last start failed
 
     # -- state ------------------------------------------------------------
 
@@ -179,16 +211,57 @@ class LlmManager:
         return hostos.http_status(
             f"http://127.0.0.1:{PORT}/v1/models", timeout).startswith("2")
 
+    def model_id_for(self, fname: str) -> str:
+        """The id a model file is advertised under: the engine's own
+        answer while that file is serving, the known id of the default
+        model, otherwise the file's stem."""
+        if (self.running and self._model_path is not None
+                and self._model_path.name == fname):
+            return getattr(self, "model_id", MODEL_ID)
+        if fname == MODEL_FILE.name:
+            return MODEL_ID
+        return fname.removesuffix(".ninfer")
+
+    def resolve_model(self, model: str | None = None,
+                      model_file: str | None = None) -> Path:
+        """The installed file a start request names — checked before
+        anything is stopped, so a bad name costs nothing.
+
+        Accepted spellings, for either field: the advertised id
+        (qwen3.8-27b), the bare filename with or without .ninfer
+        (qwen3_8_27b.ninfer, qwen3_8_27b). model_file is tried first.
+        Neither given: the model serving now (a context or profile
+        change keeps the model), else the last good one, else the
+        default. Raises UnknownModel."""
+        files = installed_model_files()
+        asked = [str(w) for w in (model_file, model) if w]
+        if not asked:
+            if self._model_path is not None and self._model_path.name in files:
+                return self._model_path
+            if self._last_good and self._last_good[1] in files:
+                return NINFER_DIR / "models" / self._last_good[1]
+            if MODEL_FILE.name in files:
+                return MODEL_FILE
+            raise UnknownModel(MODEL_FILE.name, files)
+        for wanted in asked:
+            # Path(...).name: a name, never a path — no traversal.
+            key = _norm_id(Path(wanted).name.removesuffix(".ninfer"))
+            for f in files:
+                if key in (_norm_id(f.removesuffix(".ninfer")),
+                           _norm_id(self.model_id_for(f))):
+                    return NINFER_DIR / "models" / f
+        raise UnknownModel(asked[0], [
+            f"{self.model_id_for(f)} ({f})" for f in files])
+
     def status(self) -> dict:
-        models_dir = NINFER_DIR / "models"
-        installed_files = sorted(
-            p.name for p in models_dir.glob("*.ninfer")
-            if p.stat().st_size > 10_000_000_000) if models_dir.is_dir() \
-            else []
+        installed_files = installed_model_files()
         return {
             "installed": self.installed,
             "installed_models": installed_files,
             "running": self.running,
+            # Why the last start failed, while nothing is serving — so a
+            # switch that left the node without chat says so.
+            "error": None if self.running else self.last_error,
             "healthy": self.healthy(1.5) if self.running else False,
             "model": getattr(self, "model_id", MODEL_ID)
             if self.installed else None,
@@ -241,10 +314,10 @@ class LlmManager:
         with self._lock:
             if self.running:
                 return
-            if not self.installed:
+            if not NINFER_EXE.exists():
                 raise RuntimeError(
-                    "ninfer is not installed: expected the exe and model at "
-                    f"{NINFER_EXE} / {MODEL_FILE}.")
+                    f"ninfer is not installed: expected the exe at "
+                    f"{NINFER_EXE}.")
             model_path = MODEL_FILE
             if model_file:
                 name = Path(model_file).name  # no path traversal
@@ -259,7 +332,12 @@ class LlmManager:
                 # remote chat: silicon-node issue #3).
                 self.model_id = name.replace(".ninfer", "")
             else:
+                if model_path.name not in installed_model_files():
+                    raise RuntimeError(
+                        f"ninfer is not installed: expected the model at "
+                        f"{MODEL_FILE}.")
                 self.model_id = MODEL_ID
+            self._model_path = model_path
             if context_length is not None:
                 ctx = max(CONTEXT_MIN, min(CONTEXT_MAX, int(context_length)))
             else:
@@ -299,9 +377,10 @@ class LlmManager:
                     tail = self._logfile.read_text(errors="replace")[-400:]
                 except OSError:
                     pass
-                raise RuntimeError(
+                self.last_error = (
                     "ninfer exited during startup (exit code "
                     f"{self._proc.returncode}). Log tail: {tail}")
+                raise RuntimeError(self.last_error)
             if self.healthy():
                 served = self._served_model_id()
                 if served:
@@ -311,6 +390,8 @@ class LlmManager:
                 # a failed experiment must not become the new default.
                 if getattr(self, "_ctx_explicit", False):
                     _store_context(self.model_id, self._ctx_effective)
+                self._last_good = (profile, model_path.name, context_length)
+                self.last_error = None
                 self._expect_running = True
                 self._ensure_watchdog()
                 log.info("ninfer healthy after %.0fs (model id %s)",
@@ -319,9 +400,44 @@ class LlmManager:
                 return
             time.sleep(2)
         self.stop()
-        raise RuntimeError(
+        self.last_error = (
             f"ninfer did not become healthy within {wait_healthy_s:.0f}s; "
             "stopped it again.")
+        raise RuntimeError(self.last_error)
+
+    def start_last_good(self) -> None:
+        """Bring back the last model that served, as it served (profile,
+        file, context) — the default model only if nothing ever has."""
+        if self._last_good is None:
+            self.start(self._profile)
+            return
+        profile, model_file, ctx = self._last_good
+        self.start(profile, model_file=model_file, context_length=ctx)
+
+    def fall_back(self) -> str:
+        """After a switch failed with the old model already stopped: put
+        the old model back. If even that fails, arm the watchdog so it
+        keeps trying on quiet cycles, and leave last_error set so
+        /v1/node reports the node's chat as down rather than just absent.
+        Returns what happened, for the caller's error message."""
+        if self._last_good is None:
+            return "nothing was serving before, so the node has no chat model"
+        previous = self._last_good[1]
+        error = self.last_error
+        try:
+            self.start_last_good()
+        except Exception:  # noqa: BLE001
+            log.exception("could not restore %s after a failed switch",
+                          previous)
+            self._expect_running = True
+            self._ensure_watchdog()
+            return (f"restoring {previous} failed too; the watchdog keeps "
+                    "trying, and chat is down until it succeeds")
+        # The restore succeeded; keep the reason the switch failed visible
+        # in the answer, not in status (the node is serving again).
+        self.last_error = None
+        log.info("switch failed (%s); %s restored", error, previous)
+        return f"{previous} was restarted and is serving again"
 
     @staticmethod
     def _kill_all_instances() -> None:
@@ -391,7 +507,7 @@ class LlmManager:
             try:
                 from . import pipeline as _pipeline  # noqa: PLC0415
                 _pipeline.ENGINE.unload()  # 3D residency blocks the LLM
-                self.start(self._profile)
+                self.start_last_good()
                 self._was_running_before_job = False
                 log.info("watchdog restarted the LLM")
             except Exception:  # noqa: BLE001
@@ -479,7 +595,7 @@ class LlmManager:
             return
         try:
             unload_pipelines()
-            self.start(self._profile)
+            self.start_last_good()
             # Cleared only on success — a failed restore leaves the flag
             # armed so the watchdog retries instead of giving up forever.
             self._was_running_before_job = False
