@@ -41,6 +41,108 @@ LTX_UNCENSORED_FILE = os.environ.get(
 
 _lock = threading.RLock()  # the i2v branch unloads inside the lock
 
+# The Mac's size names and the canvas each is rendered at (hub 159). All
+# three engines render 480p and 720p natively. 1080p is not rendered
+# natively on the 24 GB card: it is rendered at 720p and scaled up to
+# 1920x1080 on export, and the job's `delivery` says so.
+RESOLUTIONS = {"480p": (832, 480), "720p": (1280, 704)}
+UPSCALED = {"1080p": ("720p", (1920, 1080))}
+SUPPORTED_RESOLUTIONS = ["480p", "720p", "1080p"]
+# Explicit WxH: both engines' VAEs work in 32-pixel steps, and 1280x704
+# is the largest canvas measured on this card (Wan 12.3 GB, LTX 16.1 GB
+# peak). A bigger one risks an out-of-memory failure mid-render, so it
+# is refused up front rather than tried.
+SIDE_STEP, SIDE_MIN, SIDE_MAX = 32, 256, 1280
+MAX_PIXELS = 1280 * 704
+
+
+def canvas(resolution: str | None = None, width=None, height=None) -> dict:
+    """What a request asks for → the canvas to render and the size to
+    deliver: {"requested", "width", "height", "internal_width",
+    "internal_height", "scaling": "native" | "upscaled"}.
+
+    Raises ValueError naming what this node can do — the Mac shows the
+    message to the user, so it must say what to pick instead."""
+    if width is not None or height is not None:
+        try:
+            w, h = int(width), int(height)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "width and height must both be whole numbers.") from None
+        if (w % SIDE_STEP or h % SIDE_STEP
+                or not SIDE_MIN <= min(w, h) <= max(w, h) <= SIDE_MAX
+                or w * h > MAX_PIXELS):
+            raise ValueError(
+                f"{w}x{h} is outside what this node renders: sides from "
+                f"{SIDE_MIN} to {SIDE_MAX} in steps of {SIDE_STEP}, at most "
+                f"{MAX_PIXELS:,} pixels (1280x704 or 704x1280). Sizes: "
+                f"{', '.join(SUPPORTED_RESOLUTIONS)} — 1080p is rendered "
+                "at 720p and scaled up.")
+        return {"requested": f"{w}x{h}", "width": w, "height": h,
+                "internal_width": w, "internal_height": h,
+                "scaling": "native"}
+    name = str(resolution or "720p").strip().lower()
+    if name in RESOLUTIONS:
+        w, h = RESOLUTIONS[name]
+        return {"requested": name, "width": w, "height": h,
+                "internal_width": w, "internal_height": h,
+                "scaling": "native"}
+    if name in UPSCALED:
+        base, (dw, dh) = UPSCALED[name]
+        w, h = RESOLUTIONS[base]
+        return {"requested": name, "width": dw, "height": dh,
+                "internal_width": w, "internal_height": h,
+                "scaling": "upscaled"}
+    raise ValueError(
+        f"This node renders {', '.join(SUPPORTED_RESOLUTIONS)} (1080p is "
+        f"rendered at 720p and scaled up), or an explicit WxH; "
+        f"{resolution!r} isn't one of them.")
+
+
+def canvas_for_job(job: Job, default: str = "720p") -> dict:
+    """The job's canvas, checked again at render time: jobs from the
+    generic route, a retry, or an older node reach here without the
+    route's check."""
+    d = job.params.get("delivery")
+    if isinstance(d, dict) and d.get("requested"):
+        # Resolved by the route already: re-derive from what was asked
+        # for, so the stored numbers are never trusted on their own.
+        req = str(d["requested"])
+        if "x" in req:
+            w, _, h = req.partition("x")
+            return canvas(width=w, height=h)
+        return canvas(req)
+    if job.params.get("width") is not None or \
+            job.params.get("height") is not None:
+        return canvas(width=job.params.get("width"),
+                      height=job.params.get("height"))
+    return canvas(default)
+
+
+def _deliver(out: Path, job: Job, spec: dict) -> None:
+    """Record the delivery on the job and, for an upscaled size, scale
+    the rendered clip to it in place (audio copied through)."""
+    job.params["delivery"] = spec
+    job.receipts["delivery"] = spec
+    if spec["scaling"] != "upscaled":
+        return
+    import subprocess  # noqa: PLC0415
+    w, h = spec["width"], spec["height"]
+    scaled = out.with_name(f"{out.stem}-{h}p{out.suffix}")
+    # Scale to the target height keeping the aspect, then centre-crop the
+    # width: 1280x704 is a touch wider than 16:9, so nothing is padded.
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(out),
+         "-vf", f"scale=-2:{h}:flags=lanczos,crop={w}:{h}",
+         "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+         "-pix_fmt", "yuv420p", "-c:a", "copy", str(scaled)],
+        capture_output=True, text=True, timeout=900)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Scaling the clip to {w}x{h} failed: "
+            f"{(proc.stderr or '').strip()[-300:]}")
+    scaled.replace(out)
+
 
 def _start_image(job: Job):
     """The job's start image as RGB, opened from the job's own folder
@@ -131,20 +233,20 @@ class VideoEngine:
         # explicit per-request values always win.
         from .capsettings import CAPS  # noqa: PLC0415
         vs = CAPS.settings("text-to-video")
-        _res = {"480p": (832, 480), "720p": (1280, 704)}
-        dw, dh = _res.get(str(vs.get("resolution", "720p")), (1280, 704))
+        # Checked before any engine work: a size the card can't take is
+        # this job's error, not an out-of-memory crash mid-render.
+        spec = canvas_for_job(job, default=str(vs.get("resolution", "720p")))
         frames = min(121, max(17, int(job.params.get("frames", 49))))
-        width = int(job.params.get("width", dw))
-        height = int(job.params.get("height", dh))
+        width, height = spec["internal_width"], spec["internal_height"]
         steps = min(50, max(10, int(job.params.get(
             "steps", vs.get("wan_steps", 30)))))
 
         image_path = job.params.get("image_path")
         engine = job.params.get("engine", "wan")
         if engine == "ltx":
-            return self._generate_ltx(job, progress)
+            return self._generate_ltx(job, progress, spec)
         if engine == "ltx-uncensored":
-            return self._generate_ltx_uncensored(job, progress)
+            return self._generate_ltx_uncensored(job, progress, spec)
 
         progress(0.05, "model-load")
         torch.cuda.reset_peak_memory_stats()
@@ -190,6 +292,7 @@ class VideoEngine:
         t1 = time.time()
         out = job.dir / "clip.mp4"
         export_to_video(result.frames[0], str(out), fps=24)
+        _deliver(out, job, spec)
         job.receipts["video_export_s"] = round(time.time() - t1, 1)
         job.receipts["video_peak_vram_gb"] = round(
             torch.cuda.max_memory_allocated() / 1e9, 2)
@@ -209,7 +312,7 @@ class VideoEngine:
         except Exception:  # noqa: BLE001
             return False
 
-    def _generate_ltx(self, job: Job, progress) -> list[str]:
+    def _generate_ltx(self, job: Job, progress, spec: dict) -> list[str]:
         """LTX-2 distilled — the iteration pick: few steps, fast clips."""
         import shutil  # noqa: PLC0415
         import torch  # noqa: PLC0415
@@ -266,14 +369,15 @@ class VideoEngine:
         result = self._pipe_ltx(
             prompt=job.params.get("prompt", ""),
             num_frames=frames,
-            width=int(job.params.get("width", 1280)),
-            height=int(job.params.get("height", 704)),
+            width=spec["internal_width"],
+            height=spec["internal_height"],
             num_inference_steps=steps, generator=gen,
             callback_on_step_end=_cb)
         job.receipts["ltx_denoise_s"] = round(time.time() - t0, 1)
         progress(0.93, "video-export")
         out = job.dir / "clip.mp4"
         export_to_video(result.frames[0], str(out), fps=24)
+        _deliver(out, job, spec)
         job.receipts["video_peak_vram_gb"] = round(
             torch.cuda.max_memory_allocated() / 1e9, 2)
         name = f"{job.job_id}-clip.mp4"
@@ -366,7 +470,8 @@ class VideoEngine:
             self._ltx_unc_offload_owner = pipe
         return pipe
 
-    def _generate_ltx_uncensored(self, job: Job, progress) -> list[str]:
+    def _generate_ltx_uncensored(self, job: Job, progress,
+                                 spec: dict) -> list[str]:
         """LTX-2.3 Uncensored v1.4 — the distilled pipeline with the merged
         transformer swapped in. Clips carry the audio track the model
         generates alongside the frames, and a start image is honoured."""
@@ -387,8 +492,7 @@ class VideoEngine:
             "guidance", vs.get("ltx_uncensored_cfg", 3.5)))))
         # 241 = the Mac's ten-second ceiling at 24 fps (8k+1, as LTX wants).
         frames = min(241, max(17, int(job.params.get("frames", 49))))
-        width = int(job.params.get("width", 1280))
-        height = int(job.params.get("height", 704))
+        width, height = spec["internal_width"], spec["internal_height"]
         gen = None
         seed = job.params.get("seed")
         if seed not in (None, ""):
@@ -420,6 +524,7 @@ class VideoEngine:
         t1 = time.time()
         out = job.dir / "clip.mp4"
         self._export_with_audio(pipe, result, out, job)
+        _deliver(out, job, spec)
         job.receipts["video_export_s"] = round(time.time() - t1, 1)
         job.receipts["video_peak_vram_gb"] = round(
             torch.cuda.max_memory_allocated() / 1e9, 2)

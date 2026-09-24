@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from . import config, pipeline, uploads
 from .jobs import STORE
 from .llm import DOWNLOADS, LLM, MODEL_ID as LLM_MODEL_ID, PORT as LLM_PORT
+from .video import SUPPORTED_RESOLUTIONS as _VIDEO_RESOLUTIONS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -552,6 +553,10 @@ def capability_list() -> list[dict]:
             "id": "text-to-video",
             "name": "Text → video clip (Wan 2.2 TI2V-5B)",
             "kind": "video",
+            # Every model behind this capability takes all three (hub
+            # 159); 1080p is rendered at 720p and scaled up, which each
+            # job's `delivery` states.
+            "supported_resolutions": list(_VIDEO_RESOLUTIONS),
             "peak_vram_gb": _measured("text-to-video", "peak_vram_gb"),
             "typical_seconds": _measured("text-to-video",
                                          "typical_seconds"),
@@ -1219,6 +1224,14 @@ async def submit_generic(request: Request):
             status_code=400,
             detail=f"{cap} needs an input file; use {_FILE_ROUTES[cap]}, "
                    "which accepts it directly.")
+    if cap == "text-to-video" and ("width" in params or "height" in params):
+        from . import video as _video  # noqa: PLC0415
+        try:
+            _video.canvas(width=params.get("width"),
+                          height=params.get("height"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+    params.pop("delivery", None)   # the node's to write, not a caller's
     _require_enabled(cap)
     job = STORE.submit(cap, params)
     job.submitted_by = _submitter(request, cap)
@@ -1599,15 +1612,25 @@ async def text_to_video_submit(request: Request):
     # takes the Mac's full ten (its card says 40 s, the 24 GB card doesn't).
     max_frames = 241 if engine == "ltx-uncensored" else 121
     frames = max(17, min(max_frames, int(round(seconds * 24)) + 1))
-    res = str(body.get("resolution", "720p")).lower()
-    width, height = (1280, 704)
-    if "x" in res:
-        try:
-            width, height = (int(v) for v in res.split("x", 1))
-        except ValueError:
-            pass
+    # The Mac sends "480p" / "720p" / "1080p"; agents may send "WxH". Both
+    # were read as WxH-or-1280x704 before, so every Mac clip came out at
+    # 1280x704 whatever was picked, and any WxH at all was rendered — up
+    # to an out-of-memory crash that took the queue with it (hub 159).
+    from .capsettings import CAPS  # noqa: PLC0415
+    res = str(body.get("resolution")
+              or CAPS.settings("text-to-video").get("resolution", "720p"))
+    try:
+        if "x" in res.lower():
+            w, _, h = res.lower().partition("x")
+            spec = _video.canvas(width=w.strip(), height=h.strip())
+        else:
+            spec = _video.canvas(res)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     params = {"prompt": prompt, "frames": frames,
-              "width": width, "height": height,
+              "width": spec["internal_width"],
+              "height": spec["internal_height"],
+              "delivery": spec,
               "seed": body.get("seed"),
               "engine": engine}
     # Optional knobs the Mac doesn't send but an agent might.

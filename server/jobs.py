@@ -11,6 +11,7 @@ those on startup, so a worker restart (e.g. after CUDA OOM) keeps history.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -106,6 +107,10 @@ class Job:
             out["held"] = True
         if self.stage:
             out["stage"] = self.stage
+        # What size the clip is, and whether it was rendered at it or
+        # scaled up to it (hub 159) — video jobs only.
+        if isinstance(self.params.get("delivery"), dict):
+            out["delivery"] = self.params["delivery"]
         return out
 
     def to_disk(self) -> dict[str, Any]:
@@ -484,6 +489,7 @@ class JobStore:
             job.steps_total = steps_total
             job.save()
 
+        oom = False
         try:
             job.result_files = handler(job, progress)
             job.state = "done"
@@ -505,24 +511,35 @@ class JobStore:
             job.save()
             log.error("job %s failed: %s\n%s", job.job_id, job.error,
                       traceback.format_exc())
-            if _is_cuda_oom(exc):
-                # Do not try to recover in-process: flush state and let the
-                # supervisor restart us with a clean CUDA context.
-                log.error("CUDA OOM — exiting for supervisor restart")
-                logging.shutdown()
-                os._exit(config.OOM_EXIT_CODE)
+            oom = _is_cuda_oom(exc)
         finally:
             self._current = None
-            # Every finish is a chance to keep the disk inside its budget,
-            # so retention does not depend on the node ever restarting.
-            try:
-                self.prune()
-            except Exception:  # noqa: BLE001
-                log.exception("pruning after job %s failed", job.job_id)
-            LLM.schedule_restore(
-                _pipeline.ENGINE.unload,
-                is_busy=lambda: (len(self._pending) > 0
-                                 or self._current is not None))
+        # Out of memory fails THIS job, not the node (hub 159). Exiting for
+        # a supervisor restart used to fail every queued job of every member
+        # along with it — one oversized request, looped, kept the node
+        # down. The allocator's OOM is recoverable; recover here, outside
+        # the except block, so the traceback's frames (and the tensors
+        # they hold) are already gone. Only a device that is still broken
+        # afterwards takes the old exit.
+        if oom:
+            if _recover_from_oom():
+                log.warning("CUDA OOM on job %s; freed the card, the queue "
+                            "carries on", job.job_id)
+            else:
+                log.error("CUDA OOM left the device unusable — exiting for "
+                          "supervisor restart")
+                logging.shutdown()
+                os._exit(config.OOM_EXIT_CODE)
+        # Every finish is a chance to keep the disk inside its budget,
+        # so retention does not depend on the node ever restarting.
+        try:
+            self.prune()
+        except Exception:  # noqa: BLE001
+            log.exception("pruning after job %s failed", job.job_id)
+        LLM.schedule_restore(
+            _pipeline.ENGINE.unload,
+            is_busy=lambda: (len(self._pending) > 0
+                             or self._current is not None))
 
 
 def _is_cuda_oom(exc: BaseException) -> bool:
@@ -530,12 +547,41 @@ def _is_cuda_oom(exc: BaseException) -> bool:
     return "CUDA out of memory" in text or "OutOfMemoryError" in text
 
 
+def _recover_from_oom() -> bool:
+    """Free what an out-of-memory job left on the card, then check the
+    device still works. False means it does not, and the caller falls
+    back to a supervisor restart with a clean CUDA context."""
+    import gc  # noqa: PLC0415
+    # Resident pipelines may be half-built or hold the failed job's
+    # buffers; the next job pays a reload, which beats a restart.
+    for module in ("pipeline", "video", "image"):
+        try:
+            engine = getattr(importlib.import_module(
+                f"{__package__}.{module}"), "ENGINE", None)
+            if engine is not None:
+                engine.unload()
+        except Exception:  # noqa: BLE001
+            log.exception("could not unload %s after an OOM", module)
+    try:
+        import torch  # noqa: PLC0415
+        gc.collect()
+        torch.cuda.empty_cache()
+        probe = torch.ones(1024, device="cuda")
+        ok = float(probe.sum().item()) == 1024.0
+        del probe
+        torch.cuda.synchronize()
+        return ok
+    except Exception:  # noqa: BLE001
+        log.exception("the CUDA device failed its check after an OOM")
+        return False
+
+
 def _human_error(exc: BaseException) -> str:
     """Non-2xx / error bodies are shown to the user — make them human."""
     if _is_cuda_oom(exc):
-        return ("The GPU ran out of memory on this job. The service is "
-                "restarting with a clean slate — please try again, or use a "
-                "smaller input.")
+        return ("The GPU ran out of memory on this job. Try a smaller "
+                "size, fewer frames or a shorter input; other jobs in the "
+                "queue are unaffected.")
     msg = str(exc).strip() or type(exc).__name__
     return msg[:500]
 
