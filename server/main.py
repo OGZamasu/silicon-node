@@ -57,7 +57,11 @@ def _is_owner_local(request: Request) -> bool:
 
 @app.middleware("http")
 async def bearer_auth(request: Request, call_next):
-    if request.url.path.startswith("/v1/"):
+    # Gate on scope["path"], the path the router dispatches on. request.url
+    # is rebuilt from the Host header, which the caller writes: on
+    # starlette <= 1.0.0 a Host such as "x?" moved the path out from under
+    # this check while the router still served the /v1/ route.
+    if request.scope["path"].startswith("/v1/"):
         header = request.headers.get("authorization", "")
         supplied = header.removeprefix("Bearer ").strip() if header else ""
         from .clients import CLIENTS  # noqa: PLC0415

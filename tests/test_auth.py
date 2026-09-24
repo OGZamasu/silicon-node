@@ -78,6 +78,14 @@ def test_remote_without_token_is_rejected(tokens):
     assert r.status_code == 401
 
 
+@pytest.mark.parametrize("host", ("x?", "x#", "x/", "x?/v1/"))
+def test_a_crafted_host_header_does_not_skip_the_token_check(tokens, host):
+    """The router serves scope["path"]; the check must read the same thing,
+    not a URL rebuilt from a Host header the caller wrote."""
+    r = client(REMOTE).get("/v1/capabilities", headers={"Host": host})
+    assert r.status_code == 401
+
+
 def test_wrong_token_is_rejected_from_anywhere(tokens):
     for addr in (LOCAL, REMOTE):
         r = call(client(addr), "get", "/v1/capabilities", None, "not-a-token")

@@ -2,6 +2,9 @@
 # enough to run the node with the chat engines (ninfer / llama.cpp);
 # the GPU media pipelines add requirements-media.txt on top.
 fastapi>=0.115
+# 1.0.1 fixed a Host-header path confusion that could skip the /v1/ token
+# check; the middleware no longer depends on it, but nothing older may ship.
+starlette>=1.0.1
 uvicorn>=0.30
 python-multipart>=0.0.9
 httpx>=0.27
