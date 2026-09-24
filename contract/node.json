@@ -27,6 +27,31 @@
       "typical_seconds": null
     }
   ],
+  "decisions": {
+    "available": true,
+    "endpoint": "/v1/systemone",
+    "engine": "laya",
+    "error": null,
+    "latency_ms": null,
+    "limits": {
+      "max_body_bytes": 262144,
+      "max_options": 32,
+      "max_questions": 32,
+      "max_state_chars": 20000
+    },
+    "loaded": false,
+    "models": [
+      "laya",
+      "laya-multilingual",
+      "laya-typed-decisions"
+    ],
+    "question_types": [
+      "choice",
+      "score",
+      "noul"
+    ],
+    "vram_mib": null
+  },
   "llm": {
     "context_length": 32768,
     "max_concurrency": 4,

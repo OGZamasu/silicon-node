@@ -320,6 +320,9 @@ class LayaEngine:
         local lane and this one."""
         return {
             "engine": "laya",
+            # Where to send decisions — the Mac discovers the lane from
+            # this block (hub 161), so it names its own route.
+            "endpoint": "/v1/systemone",
             "available": bool(ENABLED and self.installed()),
             "loaded": self.loaded,
             "device": DEVICE,

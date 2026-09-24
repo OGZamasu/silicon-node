@@ -118,6 +118,15 @@ def test_the_node_advertisement_answers_the_contract_shape(local):
                     body["capabilities"][0], "capabilities[0]") == []
 
 
+def test_the_decision_lane_is_discoverable_from_the_advertisement(local):
+    """The Mac finds this node's decision lane from the top-level
+    `decisions` block, not from a capability entry (hub 161)."""
+    body = local.get("/v1/node").json()
+    assert conforms(load("node")["decisions"], body["decisions"],
+                    "decisions") == []
+    assert body["decisions"]["endpoint"] == "/v1/systemone"
+
+
 def test_queue_depth_is_reported_in_both_places(local):
     assert local.get("/health").json()["queue_depth"] == \
         local.get("/v1/node").json()["metrics"]["queue_depth"]

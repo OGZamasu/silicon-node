@@ -664,7 +664,8 @@ def _decisions_status() -> dict:
         from .systemone import SYSTEMONE  # noqa: PLC0415
         return SYSTEMONE.status()
     except Exception as exc:  # noqa: BLE001
-        return {"engine": "laya", "available": False,
+        return {"engine": "laya", "endpoint": "/v1/systemone",
+                "available": False, "loaded": False,
                 "error": f"{type(exc).__name__}"}
 
 

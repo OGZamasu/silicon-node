@@ -51,6 +51,11 @@ change to both halves at once, not a fixture edit.
 - `progress` is 0–1, not 0–100.
 - `result_urls` are node-relative paths, resolved against the peer's
   base URL by the caller.
+- The decision lane is advertised as the top-level `decisions` object of
+  `/v1/node`, not as a capability: `engine`, `endpoint` (where to POST a
+  decision), `available`, `loaded`, the `models` and `question_types` it
+  accepts, and the request `limits`. If it is ever also listed among the
+  capabilities, that entry's `kind` is `"decision"`.
 - `metrics.headroom_gb` is the one cross-platform ranking field: each
   platform computes it its own way (VRAM here, unified memory on the
   Mac), and the router only ever compares this number.
