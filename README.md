@@ -98,6 +98,14 @@ attached; opened by hand (on the WSL node that address goes through the
 Windows port proxy, so it counts as remote) the page asks for the token
 once and remembers it — or paste it as `/ui#token=…`.
 
+On Windows, `register-path-watchdog.ps1` (run once, from an elevated
+PowerShell) installs a check that runs every five minutes: it asks the
+service, the Windows port proxy and the tailnet each for `/health`, and
+repairs only the one that doesn't answer. It runs as your account from a
+copy in `%ProgramData%\SiliconNode` that only administrators can change,
+so run the script again after editing `watch-node-path.ps1`.
+[SECURITY.md](SECURITY.md) explains why it works that way.
+
 Changing something? `./scripts/check.sh` runs ruff and the whole test
 suite, and needs neither the GPU nor any weights — the tests repoint every
 data path at a scratch directory. Run it before you push; this project has

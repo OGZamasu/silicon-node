@@ -71,6 +71,29 @@ finished job; `POST /v1/jobs/prune` (operator only) reclaims space
 immediately and takes the same `keep` / `max_age_days` with the same
 zero-means-off rule. Queued, running and held jobs are never pruned.
 
+## The path watchdog
+
+`register-path-watchdog.ps1` installs a scheduled task that probes the
+node's three network legs every five minutes and repairs the one that
+failed. Two of those repairs — refreshing the port proxy, restarting the
+IP Helper or Tailscale service — need administrator rights, so the task
+runs elevated. That makes *where the script lives* matter:
+
+- **It runs as the owner's account, not SYSTEM.** WSL distros belong to
+  a user; a SYSTEM task cannot see the SiliconNode distro at all, so it
+  could never probe or restart the service inside it.
+- **It runs a copy in `%ProgramData%\SiliconNode`,** which the
+  registration script locks to SYSTEM and Administrators (owner and
+  ACL, checked after it sets them), with read-and-run for everyone else.
+  The checkout is writable by ordinary users and, through `/mnt/f`, by
+  the node's own process; an elevated task running the checkout's copy
+  would run whatever last edited it. Its log is kept in the same folder.
+- It probes `/health` only, which carries nothing but name, version,
+  uptime and queue length, so the task needs no token.
+
+Edit `watch-node-path.ps1` in the checkout, then re-run the registration
+script (elevated) to deploy the change.
+
 ## Checking it
 
 The access rules are tests, not prose: `pytest` (after `pip install -r
