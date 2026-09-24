@@ -1310,6 +1310,7 @@ function renderHyperqwen() {
     `<select data-hq="${name}">${opts.map(o =>
       `<option${o === cur ? " selected" : ""}>${o}</option>`).join("")}</select>`;
   const dot = HQ.running ? "ok" : HQ.enabled ? "warn" : "no";
+  const loading = HQ.starting && !HQ.running;
   let line;
   if (!HQ.enabled) line = "switched off — the most expensive engine here: "
     + "a 9.5 GB image, a one-time ~20 GB requantization, and it wants the "
@@ -1318,6 +1319,8 @@ function renderHyperqwen() {
   else if (HQ.install) line = `<span class="spin"></span>${esc(HQ.install.stage)}`
     + (HQ.install.error ? ` — <span class="err">${esc(HQ.install.error)}</span>` : "");
   else if (!HQ.installed) line = "not installed yet.";
+  else if (loading) line = `<span class="spin"></span>loading in <b>${esc(HQ.mode || "")}</b> `
+    + "mode — several minutes; chat stays down until it answers.";
   else if (HQ.running) line = `serving ${esc(HQ.model)} in <b>${esc(HQ.mode)}</b> `
     + `mode on :${HQ.port}` + (HQ.uptime_s ? ` · up ${hms(HQ.uptime_s)}` : "");
   else line = "installed, not running." + (HQ.container ? ` (${esc(HQ.container)})` : "");
@@ -1326,10 +1329,10 @@ function renderHyperqwen() {
   else {
     if (!HQ.installed && !HQ.install)
       acts.push(`<button class="primary" onclick="hqCall('/v1/hyperqwen/install', this)">Install</button>`);
-    if (HQ.installed && !HQ.running)
+    if (HQ.installed && !HQ.running && !loading)
       acts.push(`<button class="primary" onclick="hqCall('/v1/hyperqwen/start', this)">Load — replaces the running chat engine</button>`);
-    if (HQ.running)
-      acts.push(`<button onclick="hqCall('/v1/hyperqwen/stop', this)">Unload</button>`);
+    if (HQ.running || loading)
+      acts.push(`<button onclick="hqCall('/v1/hyperqwen/stop', this)">${loading ? "Cancel loading" : "Unload"}</button>`);
     acts.push(`<button onclick="hqEnable(false)">Turn off</button>`);
   }
   el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">

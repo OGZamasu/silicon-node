@@ -715,7 +715,7 @@ def _stop_hyperqwen_if_running() -> None:
     installed, so the other two lanes can always call it."""
     try:
         from .hyperqwen import HYPERQWEN  # noqa: PLC0415
-        if HYPERQWEN.checked_out and HYPERQWEN.running:
+        if HYPERQWEN.checked_out and HYPERQWEN.active:
             log.info("stopping HyperQwen to free the card")
             HYPERQWEN.stop()
     except Exception:  # noqa: BLE001
@@ -726,11 +726,9 @@ def _hyperqwen_status() -> dict:
     """Never let a docker probe take the advertisement down."""
     try:
         from .hyperqwen import HYPERQWEN  # noqa: PLC0415
-        st = HYPERQWEN.status()
-        # The advertisement is polled every 2.5 s by the dashboard; keep
-        # it to what a peer needs to decide, not the whole status page.
-        return {k: st[k] for k in ("engine", "enabled", "installed",
-                                   "running", "mode", "port", "model")}
+        # Polled every 2.5 s by the dashboard: the compact block, built
+        # without the docker calls the full status page makes.
+        return HYPERQWEN.advertisement()
     except Exception as exc:  # noqa: BLE001
         return {"engine": "hyperqwen", "enabled": False, "running": False,
                 "error": f"{type(exc).__name__}"}
@@ -2028,7 +2026,8 @@ async def hyperqwen_start(request: Request):
         SYSTEMONE.unload()
         HYPERQWEN.start(body.get("mode"))
     try:
-        # The first start requantizes the model: minutes, not seconds.
+        # Returns once the container is up; the engine then loads for
+        # minutes and /v1/hyperqwen reports starting until it serves.
         await asyncio.to_thread(_switch)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from None

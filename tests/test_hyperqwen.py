@@ -200,10 +200,80 @@ def test_a_broken_docker_probe_does_not_break_the_advertisement(
         local, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("docker exploded")
-    monkeypatch.setattr(hyperqwen.HYPERQWEN, "status", boom)
+    monkeypatch.setattr(hyperqwen.HYPERQWEN, "advertisement", boom)
     body = local.get("/v1/node").json()
     assert body["hyperqwen"]["running"] is False
     assert body["capabilities"]
+
+
+def test_the_advertisement_never_runs_docker(local, monkeypatch):
+    """/v1/node is polled every 2.5 s; docker.exe through interop on
+    every poll was the full status page's cost, not the advertisement's."""
+    def no_docker(*a, **k):
+        raise AssertionError("the advertisement ran docker")
+    monkeypatch.setattr(hyperqwen, "_run", no_docker)
+    monkeypatch.setattr(hyperqwen.HyperQwenManager, "checked_out", False)
+    hq = local.get("/v1/node").json()["hyperqwen"]
+    assert hq["installed"] is False and hq["starting"] is False
+
+
+# -- starting is its own state ------------------------------------------------
+
+@pytest.fixture
+def startable(local, monkeypatch):
+    """Everything start() checks, satisfied, with docker and the engine
+    replaced: `up` succeeds at once and the engine never answers."""
+    set_enabled(local, True)
+    hq = hyperqwen.HYPERQWEN
+    monkeypatch.setattr(hyperqwen.HyperQwenManager, "docker_ready",
+                        staticmethod(lambda: (True, "29.0")))
+    monkeypatch.setattr(hyperqwen.HyperQwenManager, "checked_out", True)
+    monkeypatch.setattr(hq, "image_present", lambda: True)
+    monkeypatch.setattr(hq, "prepared", lambda: True)
+    monkeypatch.setattr(hq, "write_env", lambda: {})
+    monkeypatch.setattr(hq, "_down_all", lambda: None)
+    monkeypatch.setattr(hq, "logs", lambda n=60: "still loading shards")
+    monkeypatch.setattr(hq, "healthy", lambda *a, **k: False)
+    monkeypatch.setattr(hyperqwen, "_compose_argv",
+                        lambda *a: ["docker", "compose", *a])
+    import subprocess as sp
+    monkeypatch.setattr(hyperqwen, "_run",
+                        lambda argv, timeout=120.0: sp.CompletedProcess(
+                            argv, 0, "", ""))
+    from server.llamacpp import LLAMACPP
+    from server.llm import LLM
+    monkeypatch.setattr(LLM, "_proc", None)
+    monkeypatch.setattr(LLAMACPP, "stop", lambda: None)
+    yield hq
+    hq._starting_since = None
+    hq.last_error = None
+
+
+def test_start_returns_while_the_engine_loads(startable):
+    t0 = time.time()
+    startable.start("single", wait_healthy_s=60)
+    assert time.time() - t0 < 5, "start() held the caller through the load"
+    assert startable.starting and startable.active
+    assert startable.status()["starting"] is True
+    startable.stop()
+    assert not startable.starting and not startable.active
+
+
+def test_a_load_that_never_answers_is_stopped_and_says_why(startable):
+    with pytest.raises(RuntimeError, match="did not become healthy"):
+        startable.start("single", wait_healthy_s=0.2, block=True)
+    assert "still loading shards" in startable.last_error
+    assert not startable.active
+
+
+def test_a_loading_engine_is_stopped_before_another_lane_starts(
+        startable, monkeypatch):
+    import server.main as main
+    startable.start("single", wait_healthy_s=60)
+    stopped: list[bool] = []
+    monkeypatch.setattr(startable, "stop", lambda: stopped.append(True))
+    main._stop_hyperqwen_if_running()
+    assert stopped, "a still-loading engine was left on the card"
 
 
 # -- auth ------------------------------------------------------------------

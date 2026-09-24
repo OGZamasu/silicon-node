@@ -115,6 +115,12 @@ class HyperQwenManager:
         self.install_state: dict | None = None
         self.mode: str | None = None
         self.last_error: str | None = None
+        # Set from `compose up` until the engine answers /health: the
+        # container already holds (or is filling) the card but serves
+        # nothing yet. Loading takes minutes: 15 GB of weights over the
+        # Docker file share alone took 353 s on this box.
+        self._starting_since: float | None = None
+        self._installed_cache: tuple[float, bool] | None = None
 
     # -- availability ------------------------------------------------------
 
@@ -263,6 +269,19 @@ class HyperQwenManager:
     def running(self) -> bool:
         return self.healthy(3, max_age=5)
 
+    @property
+    def starting(self) -> bool:
+        """The container is up and the engine is still loading."""
+        return self._starting_since is not None and not self.running
+
+    @property
+    def active(self) -> bool:
+        """Holding the card, serving or still loading: what the other
+        engines and the job worker must stop before they start. A loading
+        engine used to look stopped, so they would start on a card it was
+        still filling."""
+        return self._starting_since is not None or self.running
+
     def container_state(self) -> str | None:
         try:
             out = _run(_compose_argv("ps", "--format", "json"), timeout=30)
@@ -282,10 +301,12 @@ class HyperQwenManager:
     # -- control -----------------------------------------------------------
 
     def start(self, mode: str | None = None,
-              wait_healthy_s: float = 2400.0) -> None:
-        """Bring the container up. The first start also requantizes the
-        model inside the container (~20 GB, once), which is why the
-        default wait is generous."""
+              wait_healthy_s: float = 2400.0, block: bool = False) -> None:
+        """Bring the container up and return. The engine then loads for
+        minutes (status: starting) while a watcher waits for it to answer,
+        and stops it with the reason in last_error if it never does.
+        block=True waits here instead and raises on failure. Holding the
+        caller for the whole load outlived the HTTP clients that asked."""
         with self._lock:
             if not enabled():
                 raise RuntimeError(
@@ -328,19 +349,36 @@ class HyperQwenManager:
                     f"docker compose up failed: {self.last_error}")
             self.mode = mode
             self._started_at = time.time()
+            self._starting_since = self._started_at
             self._probe = None
             self.last_error = None
-        deadline = time.time() + wait_healthy_s
+        if block:
+            self._await_healthy(mode, wait_healthy_s, raise_on_fail=True)
+            return
+        threading.Thread(target=self._await_healthy,
+                         args=(mode, wait_healthy_s), daemon=True,
+                         name="hyperqwen-start").start()
+
+    def _await_healthy(self, mode: str, wait_s: float,
+                       raise_on_fail: bool = False) -> None:
+        began = self._starting_since
+        deadline = time.time() + wait_s
         while time.time() < deadline:
+            if self._starting_since != began:
+                return   # stopped, or started again, while it loaded
             if self.healthy():
-                log.info("HyperQwen healthy in %s mode", mode)
+                self._starting_since = None
+                log.info("HyperQwen healthy in %s mode after %.0f s", mode,
+                         time.time() - (began or time.time()))
                 return
             time.sleep(5)
         tail = self.logs(40)
         self.stop()
-        raise RuntimeError(
-            f"HyperQwen did not become healthy in {wait_healthy_s:.0f}s. "
-            f"Log tail: {tail[-300:]}")
+        self.last_error = (f"HyperQwen did not become healthy in "
+                           f"{wait_s:.0f}s. Log tail: {tail[-300:]}")
+        log.error("%s", self.last_error)
+        if raise_on_fail:
+            raise RuntimeError(self.last_error)
 
     def _down_all(self) -> None:
         for m in MODES:
@@ -357,6 +395,7 @@ class HyperQwenManager:
             self._down_all()
             self.mode = None
             self._started_at = None
+            self._starting_since = None
             self._probe = None
 
     def logs(self, lines: int = 60) -> str:
@@ -369,8 +408,33 @@ class HyperQwenManager:
 
     # -- advertisement -----------------------------------------------------
 
+    def _installed_cached(self, max_age: float = 60.0) -> bool:
+        """installed() asks docker and walks the model folder; the node
+        advertisement asks every 2.5 s, so it gets a minute-old answer."""
+        if not self.checked_out:
+            return False
+        now = time.time()
+        if self._installed_cache and now - self._installed_cache[0] < max_age:
+            return self._installed_cache[1]
+        ok = self.installed()
+        self._installed_cache = (now, ok)
+        return ok
+
+    def advertisement(self) -> dict:
+        """The compact block /v1/node publishes: what a peer needs to
+        decide, and nothing that runs docker on every 2.5 s poll."""
+        alive = self.running
+        loading = self._starting_since is not None and not alive
+        return {"engine": "hyperqwen", "enabled": enabled(),
+                "installed": self._installed_cached(),
+                "running": alive, "starting": loading,
+                "mode": self.mode if alive or loading else None,
+                "port": PORT,
+                "model": "Qwen3.8-27B (requantized by HyperQwen)"}
+
     def status(self) -> dict:
         alive = self.healthy(3, max_age=5)
+        loading = self._starting_since is not None and not alive
         docker_ok, docker_detail = self.docker_ready()
         return {
             "engine": "hyperqwen",
@@ -380,7 +444,8 @@ class HyperQwenManager:
             "install": self.install_state,
             "docker": {"ready": docker_ok, "detail": docker_detail},
             "running": alive,
-            "mode": self.mode if alive else None,
+            "starting": loading,
+            "mode": self.mode if alive or loading else None,
             "port": PORT,
             "model": "Qwen3.8-27B (requantized by HyperQwen)",
             "settings": _settings(),

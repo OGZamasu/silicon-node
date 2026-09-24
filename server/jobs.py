@@ -525,7 +525,7 @@ class JobStore:
             # run it, and bringing a container back is their call.
             try:
                 from .hyperqwen import HYPERQWEN  # noqa: PLC0415
-                if HYPERQWEN.running:
+                if HYPERQWEN.active:   # serving, or still loading
                     log.info("stopping HyperQwen for job %s", job.job_id)
                     HYPERQWEN.stop()
             except Exception:  # noqa: BLE001

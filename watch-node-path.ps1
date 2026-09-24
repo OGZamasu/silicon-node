@@ -48,6 +48,22 @@ function IsAdmin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# The distro lives only while some wsl.exe session holds it: without the
+# keepalive, WSL shuts SiliconNode down about two minutes after the last
+# session ends, taking the service and ninfer with it (seen 2026-09-24).
+# The keepalive task has only a logon trigger, so a keepalive that dies is
+# not replaced until the next sign-in - replace it here, before the node
+# goes down rather than after.
+$keep = Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" |
+    Where-Object { $_.CommandLine -match "SiliconNode" -and $_.CommandLine -match "sleep" }
+if (-not $keep) {
+    Log "WSL keepalive missing - restarting it"
+    Start-ScheduledTask -TaskName "SiliconNode Keepalive"
+    if (-not $?) {
+        Start-Process -FilePath "wsl.exe" -ArgumentList "-d","SiliconNode","--exec","sleep","infinity" -WindowStyle Hidden
+    }
+}
+
 $localUrl = "http://127.0.0.1:8790/health"
 $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
 $tsIp = $null
