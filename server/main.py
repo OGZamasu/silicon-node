@@ -427,14 +427,51 @@ async def jobs_prune(request: Request):
                                    max_age_days=max_age)
 
 
+_CANCEL_HTTP = {"cancelled": 200, "requested": 202, "completed": 409,
+                "failed": 409, "unsupported": 409, "unknown": 404}
+# How long the cancel route waits for a running job to reach a
+# checkpoint before answering "requested" (the Mac waits 60 s).
+CANCEL_WAIT_S = 15.0
+
+
+def _cancel_answer(request: Request, job_id: str) -> JSONResponse:
+    """POST /v1/jobs/{id}/cancel — the Mac's per-job Cancel render (hub
+    158). The answer is in the body's `cancel` field; the HTTP code
+    agrees with it. Idempotent: a repeat gets the same answer."""
+    if STORE.get(job_id) is None:
+        outcome, job = "unknown", None
+    else:
+        _require_job_owner(request, job_id)   # 403 for someone else's
+        outcome, job = STORE.request_cancel(job_id)
+        if outcome == "requested":
+            # Give the worker until its next checkpoint to stop, so the
+            # common case answers "cancelled" in one round trip.
+            deadline = time.time() + CANCEL_WAIT_S
+            while time.time() < deadline and job.state == "running":
+                time.sleep(0.1)
+            outcome, job = STORE.request_cancel(job_id)
+    details = {
+        "cancelled": "The job is stopped and will not publish results.",
+        "requested": "The job is stopping at its next checkpoint.",
+        "completed": "The job had already finished; its results are kept.",
+        "unknown": f"No job named {job_id} on this node.",
+    }
+    detail = (job.error if outcome == "failed" and job is not None
+              else details.get(outcome, ""))
+    return JSONResponse(status_code=_CANCEL_HTTP[outcome], content={
+        "job_id": job_id, "cancel": outcome,
+        "status": job.to_api()["status"] if job is not None else None,
+        "detail": detail})
+
+
 @app.post("/v1/jobs/{job_id}/{action}")
 def job_action(job_id: str, action: str, request: Request,
                direction: str = "up"):
+    if action == "cancel":
+        return _cancel_answer(request, job_id)
     _require_job_owner(request, job_id)
     ok = False
-    if action == "cancel":
-        ok = STORE.cancel(job_id)
-    elif action == "hold":
+    if action == "hold":
         ok = STORE.hold(job_id, True)
     elif action == "resume":
         ok = STORE.hold(job_id, False)
@@ -557,6 +594,10 @@ def capability_list() -> list[dict]:
             # 159); 1080p is rendered at 720p and scaled up, which each
             # job's `delivery` states.
             "supported_resolutions": list(_VIDEO_RESOLUTIONS),
+            # POST /v1/jobs/{id}/cancel answers the Mac's protocol for
+            # every job; the Mac offers Cancel render where this is listed
+            # (hub 158). Video is the one it reads today.
+            "supported_job_actions": ["cancel"],
             "peak_vram_gb": _measured("text-to-video", "peak_vram_gb"),
             "typical_seconds": _measured("text-to-video",
                                          "typical_seconds"),

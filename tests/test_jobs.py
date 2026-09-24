@@ -40,7 +40,7 @@ def drain(store: JobStore, job_id: str, timeout: float = 10.0) -> Job:
     deadline = time.time() + timeout
     while time.time() < deadline:
         job = store.get(job_id)
-        if job is not None and job.state in ("done", "failed"):
+        if job is not None and job.state in ("done", "failed", "cancelled"):
             return job
         time.sleep(0.02)
     raise AssertionError(f"{job_id} never finished: {store.get(job_id)}")
@@ -114,18 +114,20 @@ def test_a_held_job_is_skipped_until_released(store):
     assert drain(store, held.job_id).state == "done"
 
 
-def test_cancelling_a_queued_job_fails_it_rather_than_dropping_it(store):
+def test_cancelling_a_queued_job_records_it_rather_than_dropping_it(store):
     job = store.submit("noop", {})             # no worker started
     assert store.cancel(job.job_id)
-    assert store.get(job.job_id).state == "failed"
+    assert store.get(job.job_id).state == "cancelled"
     assert "Cancelled" in store.get(job.job_id).error
-    assert not store.cancel(job.job_id)        # already gone from the queue
+    assert job.job_id not in store._pending
+    # Asking again gets the same answer (hub 158: idempotent).
+    assert store.request_cancel(job.job_id)[0] == "cancelled"
 
 
 def test_cancel_queue_reports_every_job_it_dropped(store):
     ids = [store.submit("noop", {}).job_id for _ in range(3)]
     assert store.cancel_queue() == 3
-    assert all(store.get(i).state == "failed" for i in ids)
+    assert all(store.get(i).state == "cancelled" for i in ids)
 
 
 def test_a_running_job_sees_the_cancel_request(store):
@@ -134,7 +136,7 @@ def test_a_running_job_sees_the_cancel_request(store):
     while store.get(job.job_id).state != "running":
         time.sleep(0.02)
     assert store.cancel(job.job_id)
-    assert drain(store, job.job_id).state == "failed"
+    assert drain(store, job.job_id).state == "cancelled"
 
 
 def test_retry_resubmits_the_same_work_as_a_new_job(store):

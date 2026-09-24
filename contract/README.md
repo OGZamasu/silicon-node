@@ -31,6 +31,8 @@ so a one-sided edit cannot pass review quietly.
 | `job-running.json` | …mid-render, with progress/step/ETA |
 | `job-done.json` | …finished, with `result_urls` |
 | `job-failed.json` | …failed, with a human-readable `error` |
+| `job-cancelled.json` | …cancelled, with a `cancel` object (and `error`, for older Macs) |
+| `job-cancel.json` | `POST /v1/jobs/{id}/cancel` — the answer, in its `cancel` field |
 
 ## Known asymmetry
 
@@ -46,8 +48,14 @@ change to both halves at once, not a fixture edit.
 
 - A queued job reports `status: "running"` with **no** `progress`. The
   Mac shows "waiting for the card", not a 0% bar.
-- `status` collapses the node's four internal states into three:
-  `running` (queued or running), `done`, `failed`.
+- `status` collapses the node's five internal states into four:
+  `running` (queued or running), `done`, `failed`, `cancelled`. A
+  cancelled job is its own terminal state, never a failure.
+- `POST /v1/jobs/{id}/cancel` answers in the body's `cancel` field —
+  `cancelled` 200, `requested` 202, `completed` / `failed` /
+  `unsupported` 409, `unknown` 404 — and repeats give the same answer.
+  A capability lists `supported_job_actions: ["cancel"]` where the Mac
+  may offer it.
 - `progress` is 0–1, not 0–100.
 - `result_urls` are node-relative paths, resolved against the peer's
   base URL by the caller.

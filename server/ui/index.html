@@ -1686,11 +1686,13 @@ function jobRow(jb) {
     ? ` — step ${jb.step} of ${jb.steps_total}` : "";
   const sub = held ? "held — click Resume to release"
     : st === "failed" ? briefError(jb.error)
+    : st === "cancelled" ? "cancelled"
     : st === "done" ? `<span data-ago="${jb.created_at}">${ago(jb.created_at)}</span>` +
       (jb.elapsed_s != null ? ` · took ${hms(jb.elapsed_s)}` : "")
     : st === "queued" ? "waiting for the GPU"
     : (jb.stage || "starting") + stepTxt;
-  const dot = st === "done" ? "ok" : st === "failed" ? "no" : "warn";
+  const dot = st === "done" ? "ok" : st === "failed" ? "no"
+    : st === "cancelled" ? "" : "warn";
   const open = openJob === jb.job_id;
   let detail = "";
   if (open) {
@@ -1706,7 +1708,7 @@ function jobRow(jb) {
     if (held) acts.push(`<button onclick="event.stopPropagation(); jobAct('${jb.job_id}','resume')">Resume</button>`);
     if (st === "queued" || st === "running")
       acts.push(`<button class="danger" onclick="event.stopPropagation(); jobAct('${jb.job_id}','cancel')">Cancel</button>`);
-    if (st === "failed" || st === "done")
+    if (st === "failed" || st === "done" || st === "cancelled")
       acts.push(`<button onclick="event.stopPropagation(); jobAct('${jb.job_id}','retry')">Run again</button>`);
     detail = `<div style="padding:4px 0 8px 20px; font-size:12px; color:var(--secondary)">
       ${jb.prompt ? `<div class="kv"><span class="k">Prompt</span><span class="v">${esc(jb.prompt)}</span></div>` : ""}

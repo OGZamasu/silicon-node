@@ -136,7 +136,7 @@ def wait_for_job(job_id: str, timeout_s: int = 1800) -> dict[str, Any]:
     with _client() as c:
         while time.time() < deadline:
             status = c.get(f"/v1/jobs/{job_id}").json()
-            if status.get("status") in ("done", "failed"):
+            if status.get("status") in ("done", "failed", "cancelled"):
                 return status
             time.sleep(3)
     return {"status": "timeout", "job_id": job_id,

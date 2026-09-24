@@ -79,8 +79,9 @@ def local() -> TestClient:
 
 def test_the_fixtures_are_valid_json_and_stable_on_disk():
     names = sorted(p.name for p in CONTRACT.glob("*.json"))
-    assert names == ["health.json", "job-done.json", "job-failed.json",
-                     "job-queued.json", "job-running.json", "node.json"]
+    assert names == ["health.json", "job-cancel.json", "job-cancelled.json",
+                     "job-done.json", "job-failed.json", "job-queued.json",
+                     "job-running.json", "node.json"]
     for p in CONTRACT.glob("*.json"):
         assert json.loads(p.read_text())
 
@@ -168,7 +169,35 @@ def test_a_failed_job_reports_a_sentence_a_person_can_act_on():
     assert api["error"].endswith(".")
 
 
-def test_only_three_statuses_ever_reach_the_client():
+def test_a_cancelled_job_reports_its_own_status_and_a_cancel_object():
+    api = job(state="cancelled", started_at=1.0, finished_at=42.6,
+              error="Cancelled while running.").to_api()
+    assert conforms(load("job-cancelled"), api) == []
+    assert api["status"] == "cancelled"
+    assert api["cancel"]["state"] == "cancelled"
+
+
+def test_the_cancel_route_answers_the_contract_shape(local, monkeypatch):
+    import server.main as main
+    from server.jobs import JobStore
+    store = JobStore()
+    store.register("noop", lambda j, p: [])
+    monkeypatch.setattr(main, "STORE", store)
+    queued = store.submit("noop", {})      # no worker: it stays queued
+    r = local.post(f"/v1/jobs/{queued.job_id}/cancel")
+    assert r.status_code == 200
+    assert conforms(load("job-cancel"), r.json()) == []
+
+
+def test_the_video_capability_answers_the_contract_shape(local):
+    body = local.get("/v1/node").json()
+    want = next(c for c in load("node")["capabilities"]
+                if c["id"] == "text-to-video")
+    got = next(c for c in body["capabilities"] if c["id"] == "text-to-video")
+    assert conforms(want, got, "text-to-video") == []
+
+
+def test_only_four_statuses_ever_reach_the_client():
     seen = {job(state=s).to_api()["status"]
-            for s in ("queued", "running", "done", "failed")}
-    assert seen == {"running", "done", "failed"}
+            for s in ("queued", "running", "done", "failed", "cancelled")}
+    assert seen == {"running", "done", "failed", "cancelled"}

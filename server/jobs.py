@@ -38,7 +38,7 @@ class Job:
     job_id: str
     capability: str
     params: dict[str, Any]
-    state: str = "queued"  # queued | running | done | failed
+    state: str = "queued"  # queued | running | done | failed | cancelled
     held: bool = False
     cancel_requested: bool = False
     progress: Optional[float] = None
@@ -84,7 +84,8 @@ class Job:
         report "running" with no progress, per the contract.
         """
         status = {"queued": "running", "running": "running",
-                  "done": "done", "failed": "failed"}[self.state]
+                  "done": "done", "failed": "failed",
+                  "cancelled": "cancelled"}[self.state]
         out: dict[str, Any] = {"job_id": self.job_id, "status": status}
         if self.state == "running" and self.progress is not None:
             out["progress"] = round(self.progress, 3)
@@ -98,11 +99,21 @@ class Job:
         if self.state == "done":
             out["progress"] = 1.0
             out["result_urls"] = [f"/v1/files/{n}" for n in self.result_files]
-        if self.state in ("done", "failed") and self.started_at \
+        if self.state in ("done", "failed", "cancelled") and self.started_at \
                 and self.finished_at:
             out["elapsed_s"] = round(self.finished_at - self.started_at, 1)
-        if self.state == "failed" and self.error:
+        if self.state in ("failed", "cancelled") and self.error:
+            # A cancelled job keeps `error` too: Macs from before the
+            # cancelled status read it as a terminal failure's message.
             out["error"] = self.error
+        # The Mac reads `cancel` first (hub 158): stopped for good, or
+        # asked to stop and heading there at the next checkpoint.
+        if self.state == "cancelled":
+            out["cancel"] = {"state": "cancelled",
+                             "detail": self.error or "Cancelled."}
+        elif self.cancel_requested and self.state == "running":
+            out["cancel"] = {"state": "requested",
+                             "detail": "Stopping at the next checkpoint."}
         if self.held:
             out["held"] = True
         if self.stage:
@@ -119,12 +130,23 @@ class Job:
                 if not k.startswith("_")}
 
     def save(self) -> None:
+        self._write(self.to_disk())
+
+    def commit(self, **fields: Any) -> None:
+        """Change fields on disk first, then in memory: whoever sees the
+        new state in memory (a poller, the API) also finds it on disk.
+        For terminal transitions."""
+        self._write({**self.to_disk(), **fields})
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+    def _write(self, record: dict[str, Any]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         # Per-thread tmp name: the submitting API thread and the worker
         # can save concurrently, and a shared tmp made one of them
         # replace the other's already-moved file (FileNotFoundError).
         tmp = self.dir / f"status.json.{threading.get_ident()}.tmp"
-        tmp.write_text(json.dumps(self.to_disk(), indent=2, default=str))
+        tmp.write_text(json.dumps(record, indent=2, default=str))
         tmp.replace(self.dir / "status.json")
 
 
@@ -162,17 +184,25 @@ class JobStore:
                     result_files=d.get("result_files", []),
                     stage=d.get("stage"),
                     submitted_by=d.get("submitted_by"),
+                    cancel_requested=bool(d.get("cancel_requested")),
                     created_at=d.get("created_at", 0.0),
                     started_at=d.get("started_at"),
                     finished_at=d.get("finished_at"),
                     receipts=d.get("receipts", {}),
                 )
-                # Anything that was mid-flight when the process died is failed.
+                # Anything that was mid-flight when the process died is
+                # failed — unless a cancel was accepted for it first: that
+                # one is cancelled, never a failure a Mac might re-render.
                 if job.state in ("queued", "running"):
-                    job.state = "failed"
-                    job.error = ("The service restarted while this job was "
-                                 "in flight (likely a GPU out-of-memory "
-                                 "restart). Please resubmit.")
+                    if job.cancel_requested:
+                        job.state = "cancelled"
+                        job.error = "Cancelled."
+                    else:
+                        job.state = "failed"
+                        job.error = ("The service restarted while this job "
+                                     "was in flight (likely a GPU out-of-"
+                                     "memory restart). Please resubmit.")
+                    job.finished_at = job.finished_at or time.time()
                     job.save()
                 self._jobs[job.job_id] = job
             except Exception:
@@ -210,6 +240,8 @@ class JobStore:
     def enqueue(self, job: Job) -> None:
         job.save()
         with self._cv:
+            if job.state != "queued":
+                return   # cancelled while its input was still arriving
             self._pending.append(job.job_id)
             self._cv.notify()
         log.info("job %s queued (%s, params=%s)", job.job_id, job.capability,
@@ -247,22 +279,58 @@ class JobStore:
 
     # -- queue management (dashboard Activity controls) -------------------
 
-    def cancel(self, job_id: str) -> bool:
+    def request_cancel(self, job_id: str) -> tuple[str, Optional[Job]]:
+        """Stop one job — the one named, never "whatever is current"
+        (hub 158). Returns the outcome the cancel route reports:
+
+        cancelled  stopped for good; also the answer to every repeat
+        requested  running: it stops at its next progress() checkpoint,
+                   or at the commit if the handler has no more of them
+        completed  already done (the commit is atomic, so a job that is
+                   publishing its results is already done here)
+        failed     already failed, and not by a cancel
+        unknown    no job with that id
+        """
         with self._cv:
             job = self._jobs.get(job_id)
             if job is None:
-                return False
-            if job_id in self._pending:
-                self._pending.remove(job_id)
-                job.state = "failed"
-                job.error = "Cancelled before it started."
-                job.finished_at = time.time()
-                job.save()
-                return True
-            if job.state == "running":
-                job.cancel_requested = True
-                return True
-            return False
+                return "unknown", None
+            if job.state in ("cancelled", "failed"):
+                return job.state, job
+            if job.state == "done":
+                return "completed", job
+            if job.state == "queued":
+                # Waiting in the queue — or still receiving its upload,
+                # in which case enqueue() will find it cancelled.
+                if job_id in self._pending:
+                    self._pending.remove(job_id)
+                self._finish_cancelled(job, "Cancelled before it started.")
+                return "cancelled", job
+            job.cancel_requested = True
+            job.save()   # a restart must not turn it into a failure
+            return "requested", job
+
+    def cancel(self, job_id: str) -> bool:
+        """The dashboard's and the queue view's cancel: True when the job
+        is stopped or stopping."""
+        return self.request_cancel(job_id)[0] in ("cancelled", "requested")
+
+    @staticmethod
+    def _drop_artifacts(names: list[str]) -> None:
+        """Delete files a job published to FILES_DIR before its cancel
+        took effect — they are no one's results now."""
+        for name in names:
+            try:
+                (config.FILES_DIR / Path(str(name)).name).unlink()
+            except OSError:
+                pass
+
+    def _finish_cancelled(self, job: Job, detail: str) -> None:
+        """Caller holds the lock. Results a cancelled job produced are not
+        its results: they are dropped from the job (and from disk by the
+        worker, which knows which ones it published)."""
+        job.commit(state="cancelled", error=detail, result_files=[],
+                   finished_at=time.time())
 
     def hold(self, job_id: str, on: bool) -> bool:
         with self._cv:
@@ -298,15 +366,13 @@ class JobStore:
                 job = self._jobs.get(jid)
                 self._pending.remove(jid)
                 if job is not None:
-                    job.state = "failed"
-                    job.error = "Cancelled by the swarm owner."
-                    job.finished_at = time.time()
-                    job.save()
+                    self._finish_cancelled(job, "Cancelled by the swarm owner.")
                     n += 1
             if scope == "all" and self._current:
                 running = self._jobs.get(self._current)
                 if running is not None and running.state == "running":
                     running.cancel_requested = True
+                    running.save()
                     n += 1
         return n
 
@@ -330,7 +396,7 @@ class JobStore:
 
         with self._lock:
             finished = [j for j in self._jobs.values()
-                        if j.state in ("done", "failed")]
+                        if j.state in ("done", "failed", "cancelled")]
         if keep <= 0 or max_age_days <= 0:
             return {"removed": [], "freed_bytes": 0, "kept": len(finished)}
         cutoff = time.time() - max_age_days * 86400
@@ -372,7 +438,8 @@ class JobStore:
 
     def retry(self, job_id: str) -> Optional[Job]:
         source = self.get(job_id)
-        if source is None or source.state not in ("failed", "done"):
+        if source is None or source.state not in ("failed", "done",
+                                                  "cancelled"):
             return None
         params = dict(source.params)
         job = self.submit(source.capability, params, defer=True)
@@ -420,13 +487,19 @@ class JobStore:
                         self._cv.wait()
                 self._pending.remove(job_id)
                 job = self._jobs.get(job_id)
+                if job is not None:
+                    # Claimed under the lock: from here on a cancel finds
+                    # a running job, never one in neither place.
+                    self._current = job_id
+                    job.state = "running"
             if job is not None:
                 self._run_one(job)
 
     def _run_one(self, job: Job) -> None:
         handler = self._handlers[job.capability]
-        self._current = job.job_id
-        job.state = "running"
+        with self._cv:
+            self._current = job.job_id
+            job.state = "running"
         job.started_at = time.time()
         job.progress = 0.0
         job.save()
@@ -491,24 +564,36 @@ class JobStore:
 
         oom = False
         try:
-            job.result_files = handler(job, progress)
-            job.state = "done"
-            job.progress = 1.0
-            job.finished_at = time.time()
-            job.save()
-            log.info("job %s done in %.1fs — receipts: %s", job.job_id,
-                     job.finished_at - job.started_at, json.dumps(job.receipts))
+            published = handler(job, progress) or []
+            # The commit is one step under the store lock, so a cancel
+            # lands either before it (the job is cancelled and what it
+            # published is dropped) or after it (the job is done and the
+            # cancel is answered "completed") — never lost between the
+            # two, which is how a cancel accepted during the last export
+            # used to vanish (hub 158).
+            with self._cv:
+                cancelled = job.cancel_requested
+                if cancelled:
+                    self._finish_cancelled(job, "Cancelled while running.")
+                else:
+                    job.commit(result_files=published, state="done",
+                               progress=1.0, finished_at=time.time())
+            if cancelled:
+                self._drop_artifacts(published)
+                log.info("job %s cancelled at the finish; results dropped",
+                         job.job_id)
+            else:
+                log.info("job %s done in %.1fs — receipts: %s", job.job_id,
+                         job.finished_at - job.started_at,
+                         json.dumps(job.receipts))
         except JobCancelled:
-            job.state = "failed"
-            job.error = "Cancelled while running."
-            job.finished_at = time.time()
-            job.save()
+            with self._cv:
+                self._finish_cancelled(job, "Cancelled while running.")
             log.info("job %s cancelled", job.job_id)
         except Exception as exc:  # noqa: BLE001
-            job.state = "failed"
-            job.error = _human_error(exc)
-            job.finished_at = time.time()
-            job.save()
+            with self._cv:
+                job.commit(state="failed", error=_human_error(exc),
+                           finished_at=time.time())
             log.error("job %s failed: %s\n%s", job.job_id, job.error,
                       traceback.format_exc())
             oom = _is_cuda_oom(exc)

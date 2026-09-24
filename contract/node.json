@@ -25,6 +25,26 @@
       "ready": true,
       "settings": {},
       "typical_seconds": null
+    },
+    {
+      "description": "Generates a short video clip from a prompt or a start image.",
+      "detail": "Wan 2.2 TI2V-5B via diffusers, CPU-offloaded.",
+      "enabled": true,
+      "id": "text-to-video",
+      "kind": "video",
+      "name": "Text \u2192 video clip (Wan 2.2 TI2V-5B)",
+      "peak_vram_gb": null,
+      "ready": true,
+      "settings": {},
+      "supported_job_actions": [
+        "cancel"
+      ],
+      "supported_resolutions": [
+        "480p",
+        "720p",
+        "1080p"
+      ],
+      "typical_seconds": null
     }
   ],
   "decisions": {
