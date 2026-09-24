@@ -208,6 +208,44 @@ def _role(request: Request) -> str:
     return "member"
 
 
+def _owner_key(request: Request) -> str:
+    """Who owns what this request submits, by credential kind and id
+    (hub 155): "swarm", "node", "client:<name>", or "anonymous". Never a
+    display string — a joining machine picks its own name, and one named
+    "swarm (shared token)" must not own the jobs sent with that token."""
+    tok = _bearer_of(request)
+    if not tok:
+        return "node" if _is_owner_local(request) else "anonymous"
+    if config.is_swarm_token(tok):
+        return "swarm"
+    if config.is_node_token(tok):
+        return "node"
+    from .clients import CLIENTS  # noqa: PLC0415
+    name = CLIENTS.name_of(tok)
+    return f"client:{name}" if name else "anonymous"
+
+
+def _job_owner(job) -> str:
+    """The owner key a job was submitted under. Jobs from before owner
+    keys existed carry only the display label; map the two fixed labels
+    back to their credential kinds and read anything else as a client."""
+    sb = job.submitted_by or {}
+    if sb.get("owner"):
+        return sb["owner"]
+    label = sb.get("client")
+    if label in (None, "this node's token"):
+        return "node"
+    if label == "swarm (shared token)":
+        return "swarm"
+    return f"client:{label}"
+
+
+def _can_see(request: Request, job) -> bool:
+    """Operators see every job; a member sees the jobs it submitted."""
+    return (_role(request) in ("admin", "node")
+            or _job_owner(job) == _owner_key(request))
+
+
 def _submitter(request: Request, cap: Optional[str] = None) -> dict:
     """Who sent this job: the paired client's name when they used their
     own token, the shared/node token labels otherwise, plus source IP.
@@ -229,7 +267,7 @@ def _submitter(request: Request, cap: Optional[str] = None) -> dict:
                 CLIENTS.count_job(who, cap)
     ip = request.client.host if request.client else None
     from .llm import _windows_host_ip  # noqa: PLC0415
-    return {"client": who, "ip": ip,
+    return {"client": who, "owner": _owner_key(request), "ip": ip,
             "proxied": ip == _windows_host_ip(),
             "user_agent": request.headers.get("user-agent", "")[:120]}
 
@@ -285,10 +323,11 @@ async def image_to_mesh(
 
 
 @app.get("/v1/jobs")
-def jobs_list():
-    """Recent jobs, newest first (for the dashboard)."""
-    jobs = sorted(STORE.snapshot(), key=lambda j: j.created_at,
-                  reverse=True)[:20]
+def jobs_list(request: Request):
+    """Recent jobs, newest first (for the dashboard). A member sees its
+    own; operators see everyone's (hub 155)."""
+    jobs = sorted((j for j in STORE.snapshot() if _can_see(request, j)),
+                  key=lambda j: j.created_at, reverse=True)[:20]
     return [{**j.to_api(), "capability": j.capability, "state": j.state,
              "created_at": j.created_at, "started_at": j.started_at,
              "finished_at": j.finished_at,
@@ -303,24 +342,33 @@ def jobs_list():
                   if j.params.get(k)), None)} for j in jobs]
 
 
-@app.get("/v1/jobs/{job_id}")
-def job_status(job_id: str):
+def _visible_job(request: Request, job_id: str):
+    """The job, if this caller may see it. Someone else's job answers
+    exactly like a missing one, so ids can't be probed for."""
     job = STORE.get(job_id)
-    if job is None:
+    if job is None or not _can_see(request, job):
         raise HTTPException(
             status_code=404,
             detail=f"No job named {job_id} on this node. It may predate a "
                    "service restart.")
-    return job.to_api()
+    return job
+
+
+@app.get("/v1/jobs/{job_id}")
+def job_status(job_id: str, request: Request):
+    return _visible_job(request, job_id).to_api()
 
 
 @app.get("/v1/jobs/{job_id}/detail")
-def job_detail(job_id: str):
-    job = STORE.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="No such job.")
+def job_detail(job_id: str, request: Request):
+    job = _visible_job(request, job_id)
+    operator = _role(request) in ("admin", "node")
     params = {k: (v if not isinstance(v, str) or len(v) < 200 else "…")
               for k, v in job.params.items() if not k.endswith("_b64")}
+    if not operator:
+        # File names, not where the node keeps them.
+        params = {k: (Path(str(v)).name if k.endswith("_path") and v else v)
+                  for k, v in params.items()}
     return {**job.to_api(), "capability": job.capability, "params": params,
             "created_at": job.created_at, "started_at": job.started_at,
             "finished_at": job.finished_at, "receipts": job.receipts,
@@ -403,11 +451,16 @@ def job_action(job_id: str, action: str, request: Request,
 
 
 @app.get("/v1/files/{name}")
-def get_file(name: str):
+def get_file(name: str, request: Request):
     if "/" in name or "\\" in name or ".." in name:
         raise HTTPException(status_code=400, detail="Invalid file name.")
     path = config.FILES_DIR / name
-    if not path.is_file():
+    # Every artifact is named <job_id>-<label>.<ext>; it belongs to that
+    # job's owner (and the operators). One with no job left is operators'.
+    job = STORE.get("-".join(name.split("-")[:2]))
+    visible = (_can_see(request, job) if job is not None
+               else _role(request) in ("admin", "node"))
+    if not visible or not path.is_file():
         raise HTTPException(status_code=404,
                             detail=f"No artifact named {name}.")
     return FileResponse(path)
@@ -2040,16 +2093,15 @@ def _queue_view() -> dict:
 def _require_job_owner(request: Request, job_id: str) -> None:
     """Members touch only their own jobs; the swarm admin and the node
     owner touch anything (handoff 132)."""
-    actor = _actor(request)
     if _role(request) in ("admin", "node"):
         return
     job = STORE.get(job_id)
-    owner = (job.submitted_by or {}).get("client") if job else None
-    if owner != actor:
+    # Compared by credential (kind + id), never by display name (hub 155).
+    if job is None or _job_owner(job) != _owner_key(request):
         raise HTTPException(
             status_code=403,
             detail="Members can manage only their own jobs — this one "
-                   f"was submitted by {owner or 'someone else'}.")
+                   "was submitted by someone else.")
 
 
 @app.delete("/v1/queue/{job_id}")
@@ -2150,8 +2202,40 @@ def ui_asset(name: str):
     return FileResponse(_UI_DIR / name, media_type=_UI_FILES[name])
 
 
+def _guard_loopback_forwarders() -> bool:
+    """Turn strict auth on if a raw TCP forwarder delivers outside
+    traffic from loopback (hub 155). Fail-safe in one direction only:
+    once on, it stays on until the service restarts without one."""
+    if config.REQUIRE_AUTH:
+        return False
+    from .hostos import loopback_tcp_forwards  # noqa: PLC0415
+    forwards = loopback_tcp_forwards(config.PORT)
+    if not forwards:
+        return False
+    config.REQUIRE_AUTH = True
+    log.warning("tailscale serve forwards raw TCP to this service (%s): "
+                "those requests arrive from loopback with nothing to mark "
+                "them, so loopback callers now need a token too "
+                "(SILICON_NODE_REQUIRE_AUTH behaviour). Serve it over "
+                "HTTP instead to keep the console open.", ", ".join(forwards))
+    return True
+
+
 def create_app() -> FastAPI:
     config.ensure_dirs()
+    from .hostos import IS_WSL  # noqa: PLC0415
+    if not _guard_loopback_forwarders() and not IS_WSL \
+            and not config.REQUIRE_AUTH:
+        # A forwarder can be added while the node runs; look again now
+        # and then (one `tailscale serve status` every five minutes).
+        import threading  # noqa: PLC0415
+
+        def _watch_forwarders():
+            while not config.REQUIRE_AUTH:
+                time.sleep(300)
+                _guard_loopback_forwarders()
+        threading.Thread(target=_watch_forwarders, daemon=True,
+                         name="forwarder-guard").start()
     # Off by default: the decision lane builds on its first request so it
     # costs no VRAM on a node nobody is deciding on.
     from .systemone import SYSTEMONE  # noqa: PLC0415

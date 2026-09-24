@@ -159,3 +159,54 @@ def bridge_curl_argv(url: str, spool_file: Path,
             "--connect-timeout", str(connect_s), "-m", str(total_s),
             url, "-H", "Content-Type: application/json",
             "--data-binary", data]
+
+
+_LOOPBACK_NAMES = ("127.0.0.1", "localhost", "::1")
+
+
+def tcp_forwards_to(serve_config, port: int) -> list[str]:
+    """TCPForward targets in a `tailscale serve status --json` document
+    that land on this service's loopback port. The document nests serve
+    configs (per port, per foreground session, per service), so walk it
+    whole rather than trust one shape."""
+    found: list[str] = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if key == "TCPForward" and isinstance(val, str):
+                    host, _, p = val.rpartition(":")
+                    if p == str(port) and host.strip("[]") in _LOOPBACK_NAMES:
+                        found.append(val)
+                else:
+                    walk(val)
+        elif isinstance(node, list):
+            for val in node:
+                walk(val)
+    walk(serve_config)
+    return found
+
+
+def loopback_tcp_forwards(port: int) -> list[str]:
+    """Raw TCP forwarders on this host that hand outside traffic to the
+    service from loopback (hub 155). Their connections carry no
+    forwarding header, so they look exactly like the owner at the
+    console. Detected: `tailscale serve --tcp` pointed at our port — the
+    likely one on a native-Linux node. (socat, ssh -L and the like can't
+    be seen from here; SECURITY.md says to set REQUIRE_AUTH for them.)
+
+    On WSL tailscale runs on Windows, and its traffic enters the guest
+    through the port proxy from the NAT gateway, not from loopback."""
+    if IS_WSL:
+        return []
+    import json  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+    exe = shutil.which("tailscale")
+    if not exe:
+        return []
+    try:
+        out = subprocess.run([exe, "serve", "status", "--json"],
+                             capture_output=True, text=True, timeout=5)
+        return tcp_forwards_to(json.loads(out.stdout or "{}"), port)
+    except Exception:  # noqa: BLE001
+        return []

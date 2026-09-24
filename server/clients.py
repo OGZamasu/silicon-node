@@ -61,7 +61,14 @@ class ClientStore:
         name = name.strip()
         if not name or len(name) > 80:
             raise ValueError("A client needs a short, non-empty name.")
-        if name.casefold() in {"node", "admin", "member", "swarm"}:
+        # The node's roles, and the labels it writes on jobs sent with the
+        # shared and node tokens (hub 155). Ownership is compared by
+        # credential, not name, so these can no longer grant anything —
+        # but a client wearing one would still be mistaken for them in
+        # every activity listing. Parentheses are the labels' mark.
+        if (name.casefold() in {"node", "admin", "member", "swarm",
+                                "this node's token"}
+                or "(" in name or ")" in name):
             raise ValueError(
                 "That name is reserved for the node's own roles — pick "
                 "another.")

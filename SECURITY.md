@@ -50,8 +50,31 @@ enforces the same rule on its side.
 - `/health` stays open so other machines can see the node is alive. It
   says nothing except name, version, uptime, and queue length.
 
+- **Members see only their own jobs.** A paired member's job list,
+  job status, job detail and artifact downloads cover the jobs it
+  submitted; the node owner and the swarm admin see everyone's. Someone
+  else's job answers like a missing one, and a member's job detail
+  shows input *file names*, never where the node keeps them.
+- **Ownership is the credential, not the name.** A job belongs to the
+  kind of token that sent it and, for a paired machine, that machine's
+  entry — so a machine that names itself after one of the node's own
+  labels owns nothing extra. Those labels (anything with parentheses,
+  "this node's token", the role names) can't be minted as names anyway.
+
 Turn on strict mode (loopback callers must carry a token too, which
 means the local dashboard needs one) with `SILICON_NODE_REQUIRE_AUTH=1`.
+
+**Forwarders.** A raw TCP forwarder on the node's own host — `tailscale
+serve --tcp`, `socat`, `ssh -L` — delivers every outside request from
+loopback with nothing to mark it as relayed, so each one would pass as
+the owner at the console. Serve the node over HTTP instead (`tailscale
+serve` in HTTP mode adds a forwarding header, which the node treats as
+remote), or turn strict mode on. The node checks for the one it can see:
+if `tailscale serve` forwards raw TCP to its port, it switches strict mode
+on by itself and logs why (looked for at startup and every five minutes
+on a native-Linux node). On the WSL node none of this arises: Tailscale
+and the port proxy run on Windows, and their traffic enters the distro
+from the NAT gateway, never from loopback.
 
 ## Limits on what a caller can spend
 
