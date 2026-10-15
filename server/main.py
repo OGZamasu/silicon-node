@@ -1587,6 +1587,14 @@ def harness_status():
     return HARNESS.status()
 
 
+@app.post("/v1/harness/install")
+def harness_install(request: Request):
+    _require_operator(request, "Installing the DeepSeek Harness runtime")
+    from .harness import HARNESS
+    HARNESS.install()
+    return HARNESS.status()
+
+
 @app.post("/v1/harness/start")
 def harness_start(request: Request):
     _require_operator(request, "Starting the agent harness")

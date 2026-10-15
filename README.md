@@ -98,6 +98,17 @@ node directly, and a dashboard in any browser at
 attached; opened by hand (on the WSL node that address goes through the
 Windows port proxy, so it counts as remote) the page asks for the token
 once and remembers it — or paste it as `/ui#token=…`.
+The Chat page can install the optional DeepSeek Harness on demand; it
+downloads a checksum-verified portable Node.js 22 runtime and the pinned
+`dsh` package into the node's runtime folder. Built-in plain chat is also
+available without that harness. Harness agent chat is wired to the active
+local model only; its bundled hosted DeepSeek model adapter is disabled by
+Silicon Node.
+If the Windows app cannot reach the node, its window offers to start the
+`silicon-node.service` in the `SiliconNode` WSL distro. If that distro is
+not present and only one WSL distro is installed, the app uses that distro.
+With multiple distros, set `SILICON_NODE_WSL_DISTRO` to the one that runs
+the service.
 
 On Windows, `register-path-watchdog.ps1` (run once, from an elevated
 PowerShell) installs a check that runs every five minutes: it asks the
