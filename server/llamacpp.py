@@ -291,8 +291,19 @@ class LlamaCppManager:
         actually has this host's build attached — a fresh tag can sit for
         an hour with only some platforms uploaded."""
         if flavor != "prism":
-            return _fetch_json("https://api.github.com/repos/ggml-org/"
-                               "llama.cpp/releases/latest")
+            # Upstream's "latest" can be a stub with no binaries (v0.6.0
+            # carries only nightly-tag.txt) while the real builds ship as
+            # bNNNN prereleases, so walk recent releases for a usable one.
+            releases = _fetch_json("https://api.github.com/repos/ggml-org/"
+                                   "llama.cpp/releases?per_page=10")
+            for rel in releases:
+                if rel.get("draft"):
+                    continue
+                asset, _ = self._matching_assets(rel.get("assets", []))
+                if asset:
+                    return rel
+            raise RuntimeError(
+                "No llama.cpp release carries a build for this host yet.")
         releases = _fetch_json(
             f"https://api.github.com/repos/{PRISM_REPO}/releases?per_page=10")
         for rel in releases:

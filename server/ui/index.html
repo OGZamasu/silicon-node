@@ -374,8 +374,28 @@ a.dl:hover { text-decoration: underline; }
       <div id="harness-off" style="position:absolute; inset:0;
         display:flex; align-items:center; justify-content:center;
         flex-direction:column; gap:10px; background:var(--window)">
-        <div class="spin" style="width:18px;height:18px"></div>
+        <div class="spin" id="harness-spinner" style="width:18px;height:18px"></div>
         <div class="imgout" id="harness-stage">Starting the harness…</div>
+        <div id="harness-setup" style="display:none; max-width:440px;
+          padding:0 24px; text-align:center">
+          <div class="imgout" style="white-space:normal; line-height:1.5">
+            Agent chat needs the DeepSeek Harness runtime. Add it here to
+            enable prompts, or use built-in plain chat now.
+          </div>
+          <button class="primary" id="harness-install-btn"
+            onclick="installHarness()" style="margin-top:14px">
+            Add DeepSeek Harness</button>
+          <div class="spin" id="harness-install-spinner"
+            style="display:none; width:16px; height:16px; margin:12px auto 0"></div>
+          <div class="imgout" id="harness-install-stage"
+            style="display:none; white-space:normal; margin-top:10px"></div>
+          <div id="harness-install-error"
+            style="display:none; color:var(--red); white-space:pre-wrap;
+            overflow-wrap:anywhere; text-align:left; margin-top:8px;
+            max-height:150px; overflow:auto; font-size:12px"></div>
+          <button class="primary" onclick="usePlainChat()"
+            style="margin-top:10px">Use built-in plain chat</button>
+        </div>
       </div>
     </div>
     <div id="plain-panel" style="display:none; flex:1; overflow:hidden;
@@ -985,9 +1005,16 @@ function toggleExpand() {
 function chatModeSetting() {
   return localStorage.getItem("chatMode") || "harness";
 }
+function usePlainChat() {
+  localStorage.setItem("chatMode", "plain");
+  const pref = $("#pref-chat");
+  if (pref) pref.value = "plain";
+  renderChatState();
+}
 function agentUrl() { return `http://${location.hostname}:8090/`; }
 function openHarnessWindow() { window.open(agentUrl(), "_blank"); }
 let harnessStarting = false;
+let harnessInstallPending = false;
 async function ensureHarness() {
   const h = S.harness;
   if (!h || !h.installed || h.healthy || harnessStarting) return;
@@ -995,6 +1022,22 @@ async function ensureHarness() {
   try { await j("/v1/harness/start", { method: "POST" }); } catch {}
   harnessStarting = false;
   poll();
+}
+async function installHarness() {
+  if (harnessInstallPending) return;
+  harnessInstallPending = true;
+  renderChatState();
+  try {
+    await j("/v1/harness/install", { method: "POST" });
+    await poll();
+  } catch (e) {
+    const error = $("#harness-install-error");
+    error.textContent = String(e.message || e);
+    error.style.display = "block";
+  } finally {
+    harnessInstallPending = false;
+    renderChatState();
+  }
 }
 async function restartHarness(btn) {
   btn.disabled = true;
@@ -1033,9 +1076,34 @@ function renderChatState() {
       (anyLLM ? "model ready" : "no model");
   } else {
     off.style.display = "flex";
-    $("#harness-stage").textContent = !h ? "Harness state unknown…"
-      : !h.installed ? "The harness runtime is not installed."
-      : "Starting the harness…";
+    const missing = Boolean(h && !h.installed);
+    $("#harness-spinner").style.display = missing ? "none" : "";
+    $("#harness-stage").style.display = missing ? "none" : "";
+    $("#harness-setup").style.display = missing ? "block" : "none";
+    const installing = Boolean(h && h.installing);
+    const installButton = $("#harness-install-btn");
+    if (installButton) {
+      installButton.disabled = installing || harnessInstallPending;
+      installButton.textContent = installing || harnessInstallPending
+        ? "Adding DeepSeek Harness…" : "Add DeepSeek Harness";
+    }
+    const installStage = $("#harness-install-stage");
+    const installSpinner = $("#harness-install-spinner");
+    if (installStage) {
+      installStage.style.display = installing ? "block" : "none";
+      installStage.textContent = h?.install_stage || "Preparing the installer…";
+    }
+    if (installSpinner)
+      installSpinner.style.display = installing || harnessInstallPending
+        ? "block" : "none";
+    const installError = $("#harness-install-error");
+    if (installError) {
+      installError.textContent = h?.install_error || "";
+      installError.style.display = h?.install_error ? "block" : "none";
+    }
+    if (!missing)
+      $("#harness-stage").textContent = !h ? "Harness state unknown…"
+        : "Starting the harness…";
     if (document.querySelector("#p-chat").classList.contains("on"))
       ensureHarness();
   }
